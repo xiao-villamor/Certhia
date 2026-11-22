@@ -2,13 +2,13 @@
   import { productName } from '#lib/product.js';
   import { page } from '$app/state';
   import { ArrowLeft, ArrowUpRight, ChevronDown } from '@lucide/svelte';
-  import { api, apiPage, imageName, message, shortDigest, time } from '#lib/api.js';
+  import { apiPage, imageName, message, shortDigest, time } from '#lib/api.js';
   import { ecosystemGroup } from '#lib/ecosystems.js';
   import AdvisoryDetails from '#lib/AdvisoryDetails.svelte';
   import FindingTracker from '#lib/FindingTracker.svelte';
   import IssueLink from '#lib/IssueLink.svelte';
   import { findingsByImage, trackingTarget, type Advisory } from '#lib/library.js';
-  import { classificationsPath, trackingStatus, type FindingTracking, type TrackingTarget } from '#lib/tracking.js';
+  import { trackingStatus, type TrackingTarget } from '#lib/tracking.js';
 
   const fromHistory = $derived(page.url.searchParams.get('scope') === 'history');
   const indexPath = $derived('/library' + page.url.search);
@@ -33,7 +33,7 @@
     error = '';
     try {
       const params = new URLSearchParams({advisory});
-      if (!history) params.set('latest', 'true');
+      params.set('latest', String(!history));
       const result = await apiPage<Advisory[]>('/vulnerabilities?' + params, cursor, {signal});
       if (signal.aborted) return;
       const entry = result.items[0];
@@ -62,20 +62,12 @@
     return () => controller.abort();
   });
 
-  async function trackingSaved() {
+  function trackingSaved() {
     const target = tracking;
     tracking = undefined;
     if (!target) return;
     notice = 'Tracking saved.';
-    const { signal } = controller;
-    try {
-      const [annotation] = await api<FindingTracking[]>(classificationsPath(target.scanId, target.finding), {signal});
-      if (signal.aborted || !item || !annotation) return;
-      item = {...item, affected: item.affected.map(row => row.reference === target.reference && row.platform === target.platform && row.digest === target.digest
-        ? {...row, status: annotation.status, issue: annotation.issue} : row)};
-    } catch (issue) {
-      if (!signal.aborted) error = message(issue);
-    }
+    void load(target.finding, fromHistory, controller.signal);
   }
 
   function reportPath(scanId: string, finding: string) {
@@ -116,7 +108,7 @@
 {:else if item}
   <section class="panel" aria-labelledby="affected-reports">
     <div class="panel-title">
-      <div><h2 id="affected-reports">Affected image versions</h2><p>{fromHistory ? 'Includes older digests' : 'Latest scanned tags and pinned digests'}</p></div>
+      <div><h2 id="affected-reports">Affected image versions</h2><p>{fromHistory ? 'Includes older digests' : 'Latest completed scan per image reference and platform'}</p></div>
     </div>
     <!-- svelte-ignore a11y_no_noninteractive_tabindex (The table scrolls on narrow screens.) -->
     <div class="table-wrap" role="region" aria-labelledby="affected-reports" tabindex="0">

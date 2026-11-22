@@ -11,6 +11,8 @@ export interface Affected {
   ecosystem?: string;
   installed?: string;
   fixed?: string;
+  severity?: string;
+  title?: string;
   purl?: string | null;
   finishedAt?: string | null;
   issue?: TrackerIssue | null;
@@ -44,11 +46,13 @@ export function findingsByImage(advisories: Advisory[]): ImageFinding[] {
         ecosystem: image.ecosystem ?? finding.ecosystem,
         installed: image.installed ?? '',
         fixed: image.fixed ?? '',
+        severity: image.severity ?? finding.severity,
+        title: image.title ?? finding.title,
         purl: image.purl ?? undefined
       };
       const row = rows.get(key);
       if (row) row.packages.push(detail);
-      else rows.set(key, {key, image, finding, packages: [detail]});
+      else rows.set(key, {key, image, finding: detail, packages: [detail]});
     }
   }
   return [...rows.values()];

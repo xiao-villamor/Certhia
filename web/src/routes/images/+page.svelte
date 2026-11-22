@@ -14,7 +14,6 @@
   const statuses = ['all', 'attention', 'failed'];
 
   let groups = $state<Record<string, Scan[]>>({});
-  let picked = $state<string[]>([]);
   // Several repositories and history panels can stay open at once.
   let expanded = $state<string[]>([]);
   let history = $state<string[]>([]);
@@ -123,7 +122,6 @@
     retry;
     const controller = new AbortController();
     loading = true;
-    picked = [];
     expanded = [];
     history = [];
     void load(controller.signal);
@@ -138,27 +136,27 @@
     return imageName(reference);
   }
 
-  async function remove(scans: Scan[]) {
-    const ids = scans.filter(scan => !active(scan)).map(scan => scan.id);
-    if (!ids.length || busy || !confirm('Delete these ' + ids.length + ' scan records and their reports?')) return;
+  async function deleteScan(repository: string, scan: Scan) {
+    if (!auth.admin || active(scan) || busy) return;
+    const description = scan.reference + ' (' + scan.platform + ') from ' + time(scan.createdAt);
+    if (!confirm('Delete the scan record for ' + description + '?')) return;
     busy = true;
     issue = '';
     feedback = '';
     try {
-      let removed = 0;
-      for (let i = 0; i < ids.length; i += 200) {
-        const result = await api<{ removed: number }>('/images/delete', post({ ids: ids.slice(i, i + 200) }));
-        removed += result.removed;
+      const result = await api<{ removed: number }>('/images/delete', post({ ids: [scan.id] }));
+      if (result.removed === 1) {
+        const updated = { ...groups };
+        const remaining = updated[repository].filter(row => row.id !== scan.id);
+        if (remaining.length) updated[repository] = remaining;
+        else delete updated[repository];
+        groups = updated;
+        feedback = 'Deleted the scan for ' + description + '.';
+      } else {
+        issue = 'The scan could not be deleted. Refresh the catalog to see its current status.';
       }
-      retry += 1;
-      feedback = removed + ' scan records deleted.';
     } catch (error) { issue = message(error); }
     finally { busy = false; }
-  }
-
-  function removeSelected() {
-    const selected = new Set(picked);
-    void remove(repositories.flatMap(repo => repo.versions.flatMap(([key, rows]) => selected.has(key) ? rows : [])));
   }
 </script>
 
@@ -166,7 +164,6 @@
 
 <div class="page-heading">
   <div><h1>Image catalog</h1><p>Scan results and report history by tag and platform.</p></div>
-  {#if auth.admin && picked.length}<button type="button" class="button secondary" onclick={removeSelected} disabled={busy}><Trash2 size={16} aria-hidden="true" /> Delete selected reports</button>{/if}
 </div>
 {#if issue}<div class="notice error" role="alert">{issue} <button class="text-button" onclick={() => {retry += 1;}}>Refresh catalog</button></div>{/if}
 {#if feedback}<div class="notice success" role="status">{feedback}</div>{/if}
@@ -281,7 +278,7 @@
                     <h3>Scan history <span class="mono">{tag(attempt.reference, repo.name)} · {attempt.platform}</span></h3>
                     <div class="table-wrap">
                       <table>
-                        <thead><tr><th scope="col">Scan</th><th scope="col">Status</th><th scope="col" class="count">Critical</th><th scope="col" class="count">High</th></tr></thead>
+                        <thead><tr><th scope="col">Scan</th><th scope="col">Status</th><th scope="col" class="count">Critical</th><th scope="col" class="count">High</th>{#if auth.admin}<th scope="col" class="count">Actions</th>{/if}</tr></thead>
                         <tbody>
                           {#each scans as scan (scan.id)}
                             <tr>
@@ -289,18 +286,18 @@
                               <td><Status status={scan.status} />{#if scan.error && scan.status === 'failed'}<small>{scan.error}</small>{/if}</td>
                               <td class="count" class:critical-text={!!scan.counts?.critical}>{scan.counts?.critical ?? '—'}</td>
                               <td class="count">{scan.counts?.high ?? '—'}</td>
+                              {#if auth.admin}
+                                <td class="scan-action">{#if !active(scan)}
+                                  <button type="button" class="text-button delete-scan" disabled={busy}
+                                    aria-label={'Delete scan for ' + scan.reference + ' on ' + scan.platform + ' from ' + time(scan.createdAt)}
+                                    onclick={() => deleteScan(repo.name, scan)}><Trash2 size={15} aria-hidden="true" /> Delete scan</button>
+                                {/if}</td>
+                              {/if}
                             </tr>
                           {/each}
                         </tbody>
                       </table>
                     </div>
-                    {#if auth.admin && !scans.every(active)}
-                      <div class="panel-footer history-actions">
-                        <label class="inline-check"><input type="checkbox" checked={picked.includes(key)} disabled={busy}
-                          onchange={(event) => {picked = event.currentTarget.checked ? [...picked, key] : picked.filter(item => item !== key);}} /> Select visible scan records</label>
-                        <button type="button" class="text-button" onclick={() => remove(scans)} disabled={busy}><Trash2 size={15} aria-hidden="true" /> Delete visible scan records</button>
-                      </div>
-                    {/if}
                   {/if}
                 </div>
               {/each}
@@ -347,9 +344,9 @@
   .version-row small { margin-top: 0; }
   .finding-summary { display: grid; gap: .22rem; justify-items: start; }
   .finding-summary small { margin-top: 0; }
-  .version-actions, .history-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem .9rem; font-size: .79rem; line-height: 1.2; }
+  .version-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem .9rem; font-size: .79rem; line-height: 1.2; }
   .version-actions .table-link { line-height: 1.2; }
-  .history-button, .history-actions button { display: inline-flex; align-items: center; gap: .28rem; }
+  .history-button, .delete-scan { display: inline-flex; align-items: center; gap: .28rem; }
   .history-button { min-height: 32px; text-decoration: none; }
   .history-button:hover { text-decoration: underline; }
   .history-button span { color: var(--muted); }
@@ -359,7 +356,9 @@
   .history-panel h3 span { color: var(--muted); margin-inline-start: .35rem; }
   .history-panel :is(td, th) { padding: .55rem .75rem; }
   .count { text-align: end; font-variant-numeric: tabular-nums; }
-  .history-actions { justify-content: space-between; }
+  .scan-action { width: 1%; text-align: end; }
+  .delete-scan { min-height: 32px; white-space: nowrap; color: var(--muted); }
+  .delete-scan:hover { color: var(--critical); }
   @media (max-width: 1060px) {
     .catalog-controls { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .image-search { grid-column: 1 / -1; }

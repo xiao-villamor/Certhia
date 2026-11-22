@@ -4,19 +4,19 @@
   import { page } from '$app/state';
   import { onDestroy } from 'svelte';
   import { ChevronDown, Search, SlidersHorizontal } from '@lucide/svelte';
-  import { apiPage, classifications, imageName, message, shortDigest, type Finding } from '#lib/api.js';
+  import { apiPage, imageName, message, shortDigest, type Finding } from '#lib/api.js';
   import { ecosystemGroup, ecosystemTypes, sortEcosystems } from '#lib/ecosystems.js';
   import FindingTracker from '#lib/FindingTracker.svelte';
   import IssueLink from '#lib/IssueLink.svelte';
   import { findingsByImage, trackingTarget, type Advisory } from '#lib/library.js';
-  import { trackingStatus, type TrackingTarget } from '#lib/tracking.js';
+  import { trackingFilters, trackingStatus, type TrackingTarget } from '#lib/tracking.js';
 
   const levels = ['', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN'];
   const filterKeys = ['q', 'status', 'severity', 'fixable', 'ecosystem', 'linked', 'scope'];
   const filters = $derived(page.url.searchParams);
   const selectedPackage = $derived(filters.get('package') ?? '');
   const scope = $derived(filters.get('scope') === 'history' ? 'history' : '');
-  const status = $derived(classifications.find(([value]) => value === filters.get('status'))?.[0] ?? '');
+  const status = $derived(trackingFilters.find(([value]) => value === filters.get('status'))?.[0] ?? '');
   const severity = $derived(levels.find(value => value === filters.get('severity')?.toUpperCase()) ?? '');
   const ecosystem = $derived(filters.get('ecosystem') ?? '');
   const fixable = $derived(filters.get('fixable') === 'true');
@@ -25,7 +25,7 @@
   const extraFilters = $derived(Boolean(scope || linked || ecosystem));
   const params = $derived.by(() => {
     const query = new URLSearchParams();
-    if (!scope) query.set('latest', 'true');
+    query.set('latest', String(!scope));
     if (selectedPackage) query.set('package', selectedPackage);
     const text = filters.get('q')?.trim();
     if (text) query.set('q', text);
@@ -147,7 +147,7 @@
     <label class="search"><Search size={17} aria-hidden="true" /><input type="search" aria-label="Search vulnerabilities" placeholder="CVE, package, image, or issue key" value={input} oninput={(event) => search(event.currentTarget.value)} /></label>
     <select aria-label="Filter vulnerabilities by status" value={status} onchange={(event) => change({status: event.currentTarget.value})}>
       <option value="">All statuses</option>
-      {#each classifications as [value, label]}<option {value}>{label}</option>{/each}
+      {#each trackingFilters as [value, label]}<option {value}>{label}</option>{/each}
     </select>
     <label class="inline-check fix-filter"><input type="checkbox" checked={fixable} onchange={(event) => change({fixable: event.currentTarget.checked ? 'true' : ''})} /> Fix available</label>
     <button class="button secondary" type="button" aria-controls="extra-filters" aria-expanded={expanded} onclick={() => {expanded = !expanded;}}>
@@ -163,7 +163,7 @@
       </select></label>
     {/if}
     <label class="field"><span>Report scope</span><select value={scope} onchange={(event) => change({scope: event.currentTarget.value})}>
-      <option value="">Latest scanned tags</option>
+      <option value="">Latest completed scans</option>
       <option value="history">Include older digests</option>
     </select></label>
     <label class="inline-check"><input type="checkbox" checked={linked} onchange={(event) => change({linked: event.currentTarget.checked ? 'true' : ''})} /> Linked issues only</label>
@@ -233,7 +233,7 @@
       </table>
     </div>
     <div class="panel-footer results-footer">
-      <span>{findings.length} {findings.length === 1 ? 'finding' : 'findings'}{next ? ' loaded' : ''} · {scope ? 'Scan history' : 'Latest scanned tags'}</span>
+      <span>{findings.length} {findings.length === 1 ? 'finding' : 'findings'}{next ? ' loaded' : ''} · {scope ? 'Scan history' : 'Latest completed scans'}</span>
       {#if next}<button class="button secondary" type="button" disabled={loadingMore} onclick={() => {
         if (next && !loadingMore) { loadingMore = true; void load(params, controller.signal, next); }
       }}>{loadingMore ? 'Loading…' : 'Load more'}</button>{/if}

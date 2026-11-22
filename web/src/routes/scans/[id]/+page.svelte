@@ -5,15 +5,17 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import { Bell, Check, ChevronDown, ChevronRight, Columns3, ClipboardCheck, Copy, Download, GitCompareArrows, Package, RotateCcw, Search, ShieldAlert } from '@lucide/svelte';
-  import { allPages, active, api, apiFetch, classifications, imageName, message, post, repositoryName, time, type Finding, type ImageWatch, type Registry, type ScanDetail, type ScanProgress, allRegistries } from '#lib/api.js';
+  import { allPages, active, api, apiFetch, imageName, message, scannerName, post, repositoryName, time, type Finding, type ImageWatch, type Registry, type ScanDetail, type ScanProgress, allRegistries } from '#lib/api.js';
   import { findingColumns, defaultFindingColumns, readFindingColumns, saveFindingColumns, type FindingColumn } from '#lib/finding-columns.js';
   import { detectionKey, findingDetectors } from '#lib/finding-evidence.js';
   import { ecosystemGroup, sortEcosystems } from '#lib/ecosystems.js';
   import Status from '#lib/Status.svelte';
+  import ScannerDifferences from '#lib/ScannerDifferences.svelte';
+  import { vulnerabilityScannerIds } from '#lib/api.js';
   import ScanActivity from '#lib/ScanActivity.svelte';
   import FindingTracker from '#lib/FindingTracker.svelte';
   import IssueLink from '#lib/IssueLink.svelte';
-  import { classificationsPath, trackingStatus, type FindingTracking, type TrackingTarget } from '#lib/tracking.js';
+  import { classificationsPath, effectiveTrackingStatus, trackingFilters, trackingStatus, type FindingTracking, type TrackingTarget } from '#lib/tracking.js';
 
   let scan = $state<ScanDetail>();
   let tracking = $state<TrackingTarget>();
@@ -44,8 +46,9 @@
   let cbomBusy = $state(false);
   let cbomIssue = $state('');
   const visibleColumns = $derived(findingColumns.filter(column => columns.includes(column.id)));
-  const needsEvidence = $derived(columns.includes('scanners') || !!tracking?.details.length);
-  const evidencePending = $derived(needsEvidence && scan?.id !== evidence?.scanId);
+  const needsEvidence = $derived((columns.includes('scanners') || !!tracking?.details.length)
+    && scan?.report?.findings.some(finding => finding.detectedBy === undefined));
+  const evidencePending = $derived(!!needsEvidence && scan?.id !== evidence?.scanId);
   const sbomAvailable = $derived(!!scan?.report?.inventoryAvailable || sources.includes('sbom'));
   const cbomCandidate = $derived(sources.some(source => source === 'sbom' || source === 'cbom'));
   const demo = $derived(scan?.reference.startsWith('demo-fixtures.invalid/'));
@@ -69,7 +72,7 @@
   });
 
   function detectors(finding: Finding): string[] {
-    return evidence?.scanId === scan?.id ? evidence?.detectors.get(detectionKey(finding)) ?? [] : [];
+    return finding.detectedBy?.map(scannerName) ?? (evidence?.scanId === scan?.id ? evidence?.detectors.get(detectionKey(finding)) ?? [] : []);
   }
 
   $effect(() => {
@@ -197,8 +200,8 @@
       if (ecosystem && name !== ecosystem) continue;
       const items = findingGroups.get(name) ?? [];
       const matches = needle || stateFilter ? items.filter(item =>
-        (!stateFilter || (triage[item.id]?.status ?? 'open') === stateFilter) &&
-        (!needle || [item.id, item.package, item.severity, item.ecosystem, item.title, name, triage[item.id]?.issue?.key ?? '']
+        (!stateFilter || effectiveTrackingStatus(triage[item.id]) === stateFilter) &&
+        (!needle || [item.id, ...(item.aliases ?? []), item.package, item.severity, item.ecosystem, item.title, name, triage[item.id]?.issue?.key ?? '']
           .some(value => value.toLowerCase().includes(needle)))) : items;
       if (matches.length && total < limit) {
         groups.push({name, items:matches.slice(0, limit - total), total:matches.length});
@@ -227,7 +230,8 @@
     }
   }
   function edit(finding: Finding) {
-    if (scan) tracking = {scanId:scan.id, reference:scan.reference, platform:scan.platform, digest:scan.report?.digest, finding:finding.id, details:[finding]};
+    if (scan) tracking = {scanId:scan.id, reference:scan.reference, platform:scan.platform,
+      digest:scan.report?.digest, finding:finding.id, details:scan.report?.findings.filter(item => item.id === finding.id) ?? [finding]};
   }
   function trackingSaved() {
     tracking = undefined;
@@ -253,6 +257,7 @@
   $effect(() => {
     const id = page.params.id;
     const finding = page.url.searchParams.get('finding');
+    const openTracking = page.url.searchParams.get('track') === '1';
     query = finding ?? '';
     tab = 'findings';
     ecosystem = '';
@@ -276,6 +281,10 @@
         if (disposed) return;
         scan = result;
         issue = '';
+        if (openTracking && finding && result.report) {
+          const observed = result.report.findings.find(item => item.id === finding);
+          if (observed) edit(observed);
+        }
         if (active(result)) {
           if (!listener) {
             listener = new EventSource('/api/scans/' + id + '/events');
@@ -328,8 +337,8 @@
 <svelte:document onclick={closeColumnMenu} onkeydown={(event) => { if (event.key === 'Escape' && columnMenu?.open) columnMenu.open = false; }} />
 <svelte:head><title>Scan report · {productName}</title></svelte:head>
 
-<FindingTracker target={tracking} scanners={tracking?.details.flatMap(detectors) ?? []} {evidencePending}
-  evidenceUnavailable={evidence?.scanId === scan?.id && !!evidence?.unavailable} dismiss={() => {tracking = undefined;}} onSaved={trackingSaved} />
+<FindingTracker target={tracking} findingSources={tracking && new Map(tracking.details.map(detail => [detectionKey(detail), detectors(detail)]))} {evidencePending}
+  evidenceUnavailable={scan?.report?.evidenceAvailable === false || (evidence?.scanId === scan?.id && !!evidence?.unavailable)} dismiss={() => {tracking = undefined;}} onSaved={trackingSaved} />
 {#if issue}<div class="notice error" role="alert">{issue}</div>{/if}
 {#if feedback}<div class="notice success" role="status">{feedback}</div>{/if}
 {#if scan}
@@ -355,6 +364,7 @@
     <div><span>Platform</span><strong class="mono">{scan.platform}</strong></div>
     <div><span>Created</span><strong>{time(scan.createdAt)}</strong></div>
     <div><span>Source</span><strong>{({import:'Imported report',registry:'Registry',docker:'Local Docker',archive:'Image archive',kubernetes:'Kubernetes',swarm:'Docker Swarm'})[scan.source] || scan.source}</strong></div>
+    {#if scan.report?.scanners?.length}<div><span>Scanners</span><strong>{scan.report.scanners.map(scannerName).join(', ')}</strong></div>{/if}
     {#if scan.report?.os}<div><span>Operating system</span><strong>{scan.report.os}</strong></div>{/if}
     {#if scan.report?.sizeBytes}<div><span>Image size</span><strong>{(scan.report.sizeBytes / 1048576).toFixed(1)} MiB</strong></div>{/if}
     {#if scan.report?.digest}
@@ -375,6 +385,12 @@
     {#if scan.status === 'failed'}<a class="table-link" href={'/images?' + new URLSearchParams({q: repositoryName(scan.reference)})}>View image history</a>{/if}
   </div>{/if}
   {#if scan.report}
+    {#if scan.report.observationComplete === false}
+      <div class="notice warning" role="status">Vulnerability observations are incomplete. This report shows recorded detections.</div>
+    {/if}
+    {#if (scan.report.scanners ?? []).filter(id => vulnerabilityScannerIds.has(id)).length >= 2}
+      {#key scan.id}<ScannerDifferences scanId={scan.id} />{/key}
+    {/if}
     <div class="severity-strip" role="group" aria-label="Vulnerabilities by severity">
       {#each severity as label}
         <div><span class={'severity ' + label}>{label}</span><strong>{scan.report.counts[label]}</strong></div>
@@ -393,8 +409,11 @@
         </div>
         <div class="filters" role="group" aria-label="Report exports">
           {#if sbomAvailable}
-            <a class="button secondary" href={'/api/scans/' + scan.id + (scan.report.inventoryAvailable ? '/report/sbom' : '/scanner-results/sbom')} data-sveltekit-reload><Download size={15} aria-hidden="true" /> SBOM</a>
-          {:else}<button type="button" class="button secondary" disabled aria-describedby="sbom-availability">SBOM</button>{/if}
+            <a class="button secondary" href={'/api/scans/' + scan.id + (scan.report.inventoryAvailable ? '/report/sbom' : '/scanner-results/sbom')} data-sveltekit-reload><Download size={15} aria-hidden="true" /> Download CycloneDX SBOM</a>
+          {:else}<button type="button" class="button secondary" disabled aria-describedby="sbom-availability">Download CycloneDX SBOM</button>{/if}
+          {#if scan.report.inventoryAvailable}
+            <a class="button secondary" href={'/api/scans/' + scan.id + '/report/spdx'} data-sveltekit-reload><Download size={15} aria-hidden="true" /> Download SPDX JSON</a>
+          {/if}
           {#if cbomCandidate}
             <button type="button" class="button secondary" disabled={cbomBusy} aria-describedby={cbomIssue ? 'cbom-availability' : undefined}
               onclick={downloadCbom}><Download size={15} aria-hidden="true" /> {cbomBusy ? 'Downloading…' : 'CBOM'}</button>
@@ -407,7 +426,13 @@
       </div>
       {#if !sbomAvailable || !scan.report.findings.length || cbomIssue}
         <div class="report-export-status">
-          {#if !sbomAvailable}<p id="sbom-availability">SBOM requires a package inventory.</p>{/if}
+          {#if !sbomAvailable}
+            <p id="sbom-availability" role="status">
+              {#if artifactStatus === 'loading'}Checking for a scanner SBOM…
+              {:else if artifactStatus === 'error'}Could not check for a scanner SBOM. <a class="table-link" href={page.url.pathname + page.url.search} data-sveltekit-reload>Reload report</a>
+              {:else}This scan has no package inventory. To export an SBOM, scan with Trivy or Syft, or import a Trivy report that lists packages.{/if}
+            </p>
+          {/if}
           {#if cbomIssue}<p id="cbom-availability" role="alert">{cbomIssue}</p>{/if}
           {#if !scan.report.findings.length}<p id="vex-availability">OpenVEX requires at least one finding.</p>{/if}
         </div>
@@ -447,7 +472,7 @@
           {#if tab === 'findings' && findingGroups.size}
             <select aria-label="Filter findings by status" bind:value={stateFilter} onchange={() => {limit = 100;}}>
               <option value="">All statuses</option>
-              {#each classifications as [value,label]}<option {value}>{label}</option>{/each}
+              {#each trackingFilters as [value,label]}<option {value}>{label}</option>{/each}
             </select>
           {/if}
           {#if (tab === 'findings' && scan.report.findings.length) || (tab === 'packages' && scan.report.counts.packages) || (tab === 'checks' && scan.report.checks.length)}
@@ -475,7 +500,7 @@
                   {@const annotation = triage[item.id]}
                   <tr>
                     <td><button type="button" class="finding-button table-link mono" aria-haspopup="dialog" aria-label={'View details for ' + item.id}
-                      onclick={() => edit(item)}>{item.id}<ChevronRight size={15} aria-hidden="true" /></button>{#if item.title}<small>{item.title}</small>{/if}</td>
+                      onclick={() => edit(item)}>{item.id}<ChevronRight size={15} aria-hidden="true" /></button>{#if item.aliases?.length}<small class="mono">Aliases · {item.aliases.join(', ')}</small>{/if}{#if item.title}<small>{item.title}</small>{/if}</td>
                     <td><span class={'severity ' + item.severity.toLowerCase()}>{item.severity.toLowerCase()}</span></td>
                     {#each visibleColumns as column (column.id)}
                       <td>
@@ -484,10 +509,10 @@
                         {:else if column.id === 'fix'}<span class="mono version">{item.fixed || '—'}</span>
                         {:else if column.id === 'scanners'}
                           {#each detectors(item) as detector (detector)}<span class="badge neutral detector">{detector}</span>
-                          {:else}<span class="field-help">{evidencePending ? 'Loading…' : evidence?.unavailable ? 'Unavailable' : 'Not recorded'}</span>{/each}
+                          {:else}<span class="field-help">{evidencePending ? 'Loading…' : (scan.report.evidenceAvailable === false || evidence?.unavailable) ? 'Unavailable' : 'Not recorded'}</span>{/each}
                         {:else if column.id === 'tracking'}
-                          <button type="button" class="status-chip" data-status={annotation?.status ?? 'open'} aria-haspopup="dialog" aria-label={(auth.operator ? 'Edit' : 'View') + ' tracking for ' + item.id}
-                            onclick={() => edit(item)}>{trackingStatus(annotation?.status)} <ChevronDown size={13} aria-hidden="true" /></button>
+                          <button type="button" class="status-chip" data-status={effectiveTrackingStatus(annotation)} aria-haspopup="dialog" aria-label={(auth.operator ? 'Edit' : 'View') + ' tracking for ' + item.id}
+                            onclick={() => edit(item)}>{trackingStatus(effectiveTrackingStatus(annotation))} <ChevronDown size={13} aria-hidden="true" /></button>
                         {:else if annotation?.issue}<IssueLink issue={annotation.issue} />
                         {:else}<span class="field-help">—</span>{/if}
                       </td>
@@ -528,8 +553,8 @@
         </select>
         <a class="button secondary" href={'/api/scans/' + scan.id + '/report/' + format} data-sveltekit-reload><Download size={17} /> Download report</a>
       </div></div>
-      {#if sources.length}<div class="download-group"><h3>Scanner artifacts</h3><div class="filters">{#each sources as source}
-        <a class="button secondary" href={'/api/scans/' + scan.id + '/scanner-results/' + source} data-sveltekit-reload>{source.toUpperCase()} artifact</a>
+      {#if sources.length}<div class="download-group"><h3>Scan artifacts</h3><div class="filters">{#each sources as source}
+        <a class="button secondary" href={'/api/scans/' + scan.id + '/scanner-results/' + source} data-sveltekit-reload>{source === 'scheduled-sbom' ? 'Retained CycloneDX SBOM' : source.toUpperCase() + ' artifact'}</a>
       {/each}</div></div>{/if}
     </div>
     </details>

@@ -21,6 +21,8 @@ pub const FINDING_SOURCES: &str = "finding-sources";
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
 pub struct Detection {
+    #[serde(default)]
+    pub aliases: Option<Vec<String>>,
     pub id: String,
     pub ecosystem: String,
     pub package: String,
@@ -41,6 +43,7 @@ impl Detection {
     pub fn new(finding: &crate::domain::Finding, scanner: &str) -> Self {
         Self {
             id: finding.id.clone(),
+            aliases: Some(finding.aliases.clone()),
             ecosystem: finding.ecosystem.clone(),
             package: finding.package.clone(),
             installed: finding.installed.clone(),
@@ -137,7 +140,7 @@ async fn list(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Json<
     }
     let kinds=sqlx::query_scalar!(r#"SELECT kind AS "kind!" FROM artifact_refs WHERE scan_id=$1 UNION SELECT 'trivy' FROM scans s JOIN scan_directory d USING(id,queued_at) WHERE d.id=$1 AND s.raw_report_ref IS NOT NULL ORDER BY 1"#,crate::key(&id)?).fetch_all(&app.0.database.primary).await?;
     Ok(Json(
-        json!({"scanners":kinds.into_iter().filter(|kind| kind != FINDING_SOURCES).collect::<Vec<_>>()}),
+        json!({"scanners":kinds.into_iter().filter(|kind| kind != FINDING_SOURCES && kind != "discrepancies" && kind != crate::discrepancies::ARTIFACT).collect::<Vec<_>>()}),
     ))
 }
 
@@ -151,29 +154,119 @@ async fn finding_sources(
         .replay(&id)
         .await?
         .ok_or_else(|| ApiError::missing("Scan not found."))?;
-    let artifact = report(&app, &id, FINDING_SOURCES).await?;
-    let native_trivy = if let Some(bytes) = artifact {
-        match serde_json::from_slice::<Option<Vec<Detection>>>(&bytes)
-            .map_err(anyhow::Error::from)?
-        {
-            Some(rows) => return Ok(Json(rows)),
-            None => true,
-        }
-    } else {
-        false
-    };
-    if (native_trivy || job.source == "import")
-        && let Some(bytes) = trivy(&app, &id).await?
+    Ok(Json(detections(&app, &id, &job.source).await?))
+}
+
+async fn detections(app: &App, id: &str, source: &str) -> Result<Vec<Detection>> {
+    let stored = report(app, id, FINDING_SOURCES).await?;
+    if let Some(bytes) = &stored
+        && let Some(mut rows) = serde_json::from_slice::<Option<Vec<Detection>>>(bytes)?
     {
-        let rows = tokio::task::spawn_blocking(move || {
-            let report = crate::domain::Report::from_trivy(&bytes)?;
-            Ok::<_, anyhow::Error>(trivy_detections(&report).into_iter().collect())
-        })
-        .await
-        .map_err(anyhow::Error::from)??;
-        return Ok(Json(rows));
+        // Older evidence files contain detector identities but no alias field. Read their retained originals.
+        let legacy: BTreeSet<_> = rows
+            .iter()
+            .filter(|r| r.aliases.is_none())
+            .map(|r| r.scanner.clone())
+            .collect();
+        for tool in legacy {
+            let original = if tool == "trivy" {
+                trivy(app, id).await
+            } else {
+                report(app, id, &tool).await
+            };
+            let Ok(Some(raw)) = original else {
+                continue;
+            };
+            let parsed = tokio::task::spawn_blocking(move || -> Result<_> {
+                let report = match tool.as_str() {
+                    "trivy" => crate::domain::Report::from_trivy(&raw)?,
+                    "grype" | "osv" => crate::native_scanners::parse(
+                        &tool,
+                        &mut serde_json::from_slice(&raw)?,
+                        "",
+                    )?,
+                    _ => return Ok(Vec::new()),
+                };
+                Ok(report
+                    .findings
+                    .iter()
+                    .map(|f| Detection::new(f, &tool))
+                    .collect::<Vec<_>>())
+            })
+            .await?;
+            if let Ok(parsed) = parsed {
+                rows.extend(parsed);
+            }
+        }
+        return Ok(rows);
     }
-    Ok(Json(Vec::new()))
+    if (stored.is_some() || source == "import")
+        && let Some(bytes) = trivy(app, id).await?
+    {
+        return tokio::task::spawn_blocking(move || {
+            let report = crate::domain::Report::from_trivy(&bytes)?;
+            Ok(trivy_detections(&report).into_iter().collect())
+        })
+        .await?;
+    }
+    Ok(Vec::new())
+}
+
+pub async fn enrich(
+    app: &App,
+    id: &str,
+    source: &str,
+    result: &mut crate::domain::Report,
+) -> Result<()> {
+    if result.findings.is_empty() {
+        return Ok(());
+    }
+    let rows = detections(app, id, source).await?;
+    let mut by_package = std::collections::BTreeMap::<_, Vec<&Detection>>::new();
+    for row in &rows {
+        for id in std::iter::once(&row.id).chain(row.aliases.iter().flatten()) {
+            by_package
+                .entry((
+                    id.as_str(),
+                    row.package.as_str(),
+                    row.ecosystem.as_str(),
+                    row.installed.as_str(),
+                    row.purl.as_deref(),
+                ))
+                .or_default()
+                .push(row);
+        }
+    }
+    for finding in &mut result.findings {
+        let key = (
+            finding.id.as_str(),
+            finding.package.as_str(),
+            finding.ecosystem.as_str(),
+            finding.installed.as_str(),
+            finding.purl.as_deref(),
+        );
+        if let Some(matches) = by_package.get(&key) {
+            let mut ids = BTreeSet::new();
+            let mut engines = BTreeSet::new();
+            let owners: BTreeSet<_> = matches
+                .iter()
+                .filter(|r| r.id != finding.id)
+                .map(|r| &r.id)
+                .collect();
+            for row in matches {
+                if owners.len() > 1 && row.id != finding.id {
+                    continue;
+                }
+                ids.insert(row.id.clone());
+                ids.extend(row.aliases.iter().flatten().cloned());
+                engines.insert(row.scanner.clone());
+            }
+            ids.remove(&finding.id);
+            finding.aliases = ids.into_iter().collect();
+            finding.detected_by = engines.into_iter().collect();
+        }
+    }
+    Ok(())
 }
 
 pub async fn cbom(app: &App, id: &str) -> Result<Option<Vec<u8>>> {
@@ -241,6 +334,31 @@ async fn report(app: &App, id: &str, kind: &str) -> Result<Option<Vec<u8>>> {
     }
 }
 
+pub async fn discrepancies(app: &App, id: &str) -> Result<Option<Vec<u8>>> {
+    use crate::discrepancies::{ARTIFACT, from_bytes};
+    if let Some(bytes) = report(app, id, ARTIFACT).await? {
+        return Ok(Some(bytes));
+    }
+    let (trivy, grype, osv) = tokio::try_join!(
+        trivy(app, id),
+        report(app, id, "grype"),
+        report(app, id, "osv")
+    )?;
+    let reports = [trivy, grype, osv];
+    if reports.iter().flatten().count() < 2 {
+        return Ok(None);
+    }
+    let sbom = report(app, id, "sbom").await?;
+    tokio::task::spawn_blocking(move || {
+        from_bytes(
+            reports.each_ref().map(|raw| raw.as_deref()),
+            sbom.as_deref(),
+        )
+        .map(Some)
+    })
+    .await?
+}
+
 pub async fn bundle(app: &App, id: &str) -> Result<Vec<(String, Vec<u8>)>> {
     const MAX_BUNDLE_INPUT: usize = 80 * 1024 * 1024;
     let mut files = Vec::new();
@@ -264,7 +382,12 @@ async fn download(
     State(app): State<App>,
     Path((id, tool)): Path<(String, String)>,
 ) -> ApiResult<Response> {
-    if !TOOLS.contains(&tool.as_str()) && !matches!(tool.as_str(), "sbom" | "cbom") {
+    if !TOOLS.contains(&tool.as_str())
+        && !matches!(
+            tool.as_str(),
+            "sbom" | "cbom" | crate::exports::SCHEDULED_SBOM
+        )
+    {
         return Err(ApiError::missing("Unknown scanner."));
     }
     if app.0.database.replay(&id).await?.is_none() {
@@ -276,6 +399,14 @@ async fn download(
         report(&app, &id, &tool).await?
     }
     .ok_or_else(|| ApiError::missing("Scanner report unavailable."))?;
+    if tool == crate::exports::SCHEDULED_SBOM {
+        return Ok(crate::exports::attachment(
+            &id,
+            "application/vnd.cyclonedx+json",
+            "cdx.json",
+            bytes,
+        ));
+    }
     Ok((
         [
             (

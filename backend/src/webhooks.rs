@@ -24,6 +24,7 @@ pub fn routes() -> Router<App> {
             get(configuration).post(generate).delete(revoke),
         )
         .route("/webhooks/registries/{id}/ci", post(ci))
+        .route("/webhooks/registries/{id}/ci/{scan_id}", get(ci_result))
         .route("/webhooks/registries/{id}/harbor", post(harbor))
         .layer(DefaultBodyLimit::max(128 * 1024))
 }
@@ -169,6 +170,35 @@ async fn ci(
     .await
 }
 
+async fn ci_result(
+    State(app): State<App>,
+    Path((registry_id, scan_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> ApiResult<([(header::HeaderName, &'static str); 1], Json<Value>)> {
+    authorize(&app, &registry_id, &headers).await?;
+    let result = sqlx::query_scalar::<_, Value>(
+        "SELECT jsonb_build_object('id',s.id,'reference',s.reference,'platform',s.platform,
+            'status',s.status,'reportUrl','/scans/'||s.id::text,
+            'observationComplete',s.observation_complete,'scanners',coalesce(string_to_array(s.scanner,', '),'{}'),
+            'fixableHigh',f.high,'fixableCritical',f.critical)
+         FROM ci_scan_results g JOIN scan_directory d ON d.id=g.scan_id JOIN scans s USING(id,queued_at)
+         LEFT JOIN LATERAL (
+            SELECT count(*) FILTER (WHERE severity=3) AS high,
+                   count(*) FILTER (WHERE severity=4) AS critical
+            FROM (
+                SELECT max(k.severity_id) AS severity
+                FROM observed_findings(s.digest_id,d.observed_order,d.scan_no,true) k
+                WHERE s.status='completed' AND s.observation_complete=true AND k.fixed_in IS NOT NULL
+                GROUP BY k.advisory_id
+            ) fixable
+         ) f ON s.status='completed' AND s.observation_complete=true
+         WHERE g.registry_id=$1 AND g.scan_id=$2 AND g.expires_at>now()",
+    ).bind(crate::key(&registry_id)?).bind(crate::key(&scan_id)?)
+        .fetch_optional(&app.0.database.primary).await?
+        .ok_or_else(|| ApiError::missing("CI scan result not found."))?;
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(result)))
+}
+
 #[derive(Deserialize)]
 struct HarborEvent {
     #[serde(rename = "type")]
@@ -258,6 +288,7 @@ async fn queue(
     references: impl FnOnce(&str) -> ApiResult<BTreeSet<String>>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     let host = authorize(app, registry_id, headers).await?;
+    let registry_key = crate::key(registry_id)?;
     let mut tx = app.0.database.primary.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(192387115)")
         .execute(&mut *tx)
@@ -271,7 +302,7 @@ async fn queue(
     let mut queued = 0;
     for reference in references {
         let active=sqlx::query_scalar!("SELECT id FROM scans WHERE registry_profile_id=$1 AND reference=$2 AND platform=$3
-            AND source='registry' AND status IN ('queued','running') ORDER BY queued_at DESC LIMIT 1",crate::key(registry_id)?,reference,platform)
+            AND source='registry' AND status IN ('queued','running') ORDER BY queued_at DESC LIMIT 1",registry_key,reference,platform)
             .fetch_optional(&mut *tx).await?.map(|id|id.to_string());
         if let Some(id) = active {
             ids.push(id);
@@ -301,6 +332,19 @@ async fn queue(
         .await?;
         ids.push(id);
         queued += 1;
+    }
+    if trigger == "ci" {
+        for id in &ids {
+            sqlx::query(
+                "INSERT INTO ci_scan_results (registry_id,scan_id,expires_at)
+                VALUES ($1,$2,now()+interval '24 hours')
+                ON CONFLICT(registry_id,scan_id) DO UPDATE SET expires_at=excluded.expires_at",
+            )
+            .bind(registry_key)
+            .bind(crate::key(id)?)
+            .execute(&mut *tx)
+            .await?;
+        }
     }
     tx.commit().await?;
     if queued > 0 {

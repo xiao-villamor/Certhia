@@ -106,8 +106,9 @@
     <form class="form-panel wide" onsubmit={save}>
       <h3>{adding ? 'Add user' : 'Edit user'}</h3>
       <div class="form-grid">
-        <label class="field"><span>Email</span>
-          <input type="email" bind:value={email} required maxlength="254" readonly={!!edited} />
+        <label class="field"><span>Username</span>
+          <input bind:value={email} required maxlength="254" autocapitalize="none" spellcheck="false" readonly={!!edited} />
+          <small>A username, or an email address for single sign-on linking.</small>
         </label>
         <label class="field"><span>Display name</span>
           <input bind:value={displayName} required maxlength="100" />
@@ -118,12 +119,12 @@
         {#if adding && auth.session?.local}
           <label class="field"><span>Initial password</span>
             <input type="password" bind:value={password} required={!auth.session.oidcEmailLinking}
-              minlength="12" maxlength="1024" autocomplete="new-password" />
-            <small>{auth.session.oidcEmailLinking ? 'Leave blank for single sign-on only.' : 'Share this securely. Use at least 12 characters.'}</small>
+              minlength="8" maxlength="1024" autocomplete="new-password" />
+            <small>{auth.session.oidcEmailLinking ? 'Leave blank for single sign-on only.' : 'Share this securely. Use at least 8 characters.'}</small>
           </label>
         {:else if edited?.hasPassword && auth.session?.local && edited.id !== auth.session.user.id}
           <label class="field"><span>Reset password <small>Optional</small></span>
-            <input type="password" bind:value={password} minlength="12" maxlength="1024" autocomplete="new-password" />
+            <input type="password" bind:value={password} minlength="8" maxlength="1024" autocomplete="new-password" />
             <small>Setting a new password signs this user out on all devices.</small>
           </label>
         {/if}

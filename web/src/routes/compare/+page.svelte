@@ -4,7 +4,10 @@
   import { page } from '$app/state';
   import { onMount } from 'svelte';
   import { Download, GitCompareArrows } from '@lucide/svelte';
-  import { active, api, apiPage, imageName, message, platforms, post, repositoryName, time, type Change, type Comparison, type Registry, type Scan, allRegistries } from '#lib/api.js';
+  import { active, api, apiPage, imageName, message, platforms, post, time, type Change, type Comparison, type Observation, type Registry, type Scan, allRegistries } from '#lib/api.js';
+
+  import IssueLink from '#lib/IssueLink.svelte';
+  import { findingReportPath } from '#lib/tracking.js';
 
   let scans = $state<Scan[]>([]);
   let registries = $state<Registry[]>([]);
@@ -14,7 +17,7 @@
   let beforeRegistry = $state('');
   let afterRegistry = $state('');
   let platform = $state('linux/amd64');
-  let waiting = $state<{baseline:string;target:string}>();
+  let waiting = $state<{baseline:string;target:string;publication?:string}>();
   let timer: ReturnType<typeof setTimeout>;
   let baseline = $state('');
   let target = $state('');
@@ -26,13 +29,15 @@
   let issue = $state('');
   let controller: AbortController;
   let registryRequest = false;
+  let detectionFilter = $state<Observation['status'] | ''>('');
   const selectedTarget = $derived(scans.find(scan => scan.id === target));
   const selectedBaseline = $derived(scans.find(scan => scan.id === baseline));
+  const publicationView = $derived(page.url.searchParams.has('publication'));
   const endpoint = '/scans?status=completed';
   const vulnerabilityChanges = {
     Added: { label: 'Newly detected', tone: 'high' },
     Removed: { label: 'No longer detected', tone: 'completed' },
-    Changed: { label: 'Changed', tone: 'neutral' }
+    'Still detected': { label: 'Still detected', tone: 'neutral' }
   } as const;
 
   function includeReports(rows: Scan[]) {
@@ -59,6 +64,14 @@
       try {
         const targetId = page.url.searchParams.get('target');
         const baselineId = page.url.searchParams.get('baseline');
+        const publication = page.url.searchParams.get('publication');
+        if (page.url.searchParams.has('publication')) {
+          if (!publication || !targetId || !baselineId) throw new Error('This publication link is missing a publication or scan ID.');
+          waiting = { baseline: baselineId, target: targetId, publication };
+          busy = true;
+          await check();
+          return;
+        }
         await loadReports(signal);
         const [after, before] = await Promise.all([
           targetId ? findReport(targetId, signal) : scans[0],
@@ -69,11 +82,13 @@
         target = after.id;
         if (before) baseline = before.id;
         else if (targetId) {
-          const params = new URLSearchParams({ status: 'completed', platform: after.platform, repository: repositoryName(after.reference), limit: '1' });
-          const {items} = await apiPage<Scan[]>('/scans?' + params, after.id, {signal});
-          if (signal.aborted) return;
-          includeReports(items);
-          baseline = items[0]?.id ?? '';
+          const previous = await api<{id: string | null}>('/scans/' + after.id + '/previous', {signal});
+          if (previous.id) {
+            const report = await findReport(previous.id, signal);
+            if (signal.aborted) return;
+            includeReports([report]);
+            baseline = report.id;
+          }
         }
         if (targetId && baseline && target !== baseline) await compareReports();
       } catch (error) {if (!signal.aborted) issue = message(error);}
@@ -101,7 +116,7 @@
   async function compareReports(event?: SubmitEvent) {
     event?.preventDefault();
     if (!baseline || !target || baseline === target || busy) return;
-    busy = true; issue = ''; result = undefined;
+    busy = true; issue = ''; result = undefined; detectionFilter = '';
     try {result = await api('/compare?' + new URLSearchParams({baseline,target}), {signal: controller.signal});}
     catch (error) {if (!controller.signal.aborted) issue = message(error);}
     finally {busy = false;}
@@ -111,7 +126,12 @@
     if (!waiting) return;
     try {
       const ids = waiting;
-      const [before, after] = await Promise.all([api<Scan>('/scans/' + ids.baseline),api<Scan>('/scans/' + ids.target)]);
+      const { signal } = controller;
+      const [before, after] = await Promise.all([
+        api<Scan>('/scans/' + encodeURIComponent(ids.baseline), {signal}),
+        api<Scan>('/scans/' + encodeURIComponent(ids.target), {signal})
+      ]);
+      if (signal.aborted) return;
       if (active(before) || active(after)) {
         timer = setTimeout(check, 2200);
         return;
@@ -119,15 +139,19 @@
       if (before.status !== 'completed' || after.status !== 'completed') {
         throw new Error(before.error || after.error || 'A scan failed to complete.');
       }
-      result = await api('/compare?' + new URLSearchParams(ids));
-    } catch (error) {issue = message(error);}
+      const params = new URLSearchParams({baseline: ids.baseline, target: ids.target});
+      if (ids.publication) params.set('publication', ids.publication);
+      result = await api('/compare?' + params, {signal});
+    } catch (error) {
+      if (!controller.signal.aborted) issue = message(error);
+    }
     waiting = undefined;
     busy = false;
   }
 
   async function plan(event: SubmitEvent) {
     event.preventDefault();
-    busy = true; issue = ''; result = undefined; waiting = undefined;
+    busy = true; issue = ''; result = undefined; waiting = undefined; detectionFilter = '';
     try {
       waiting = await api('/compare/plan', post({
         baseline:{reference:beforeRef,registryId:beforeRegistry || null,platform},
@@ -138,29 +162,54 @@
   }
 
   function download(comparison: Comparison) {
-    const escape = (value: string) => value.replace(/[\r\n]/g, ' ').replace(/[\\|<>&`*\[\]]/g, (character) => '\\' + character);
-    const lines = ['# Container image comparison', '', '- Baseline: ' + escape(comparison.baseline.reference) + ' (' + comparison.baseline.platform + ')',
-      '- Target: ' + escape(comparison.target.reference) + ' (' + comparison.target.platform + ')', '',
-      'Finding changes may reflect differences in advisory data between scans.', ''];
-    const groups: [string, Change[]][] = [['Package changes', comparison.changes.packages], ['Vulnerability finding changes', comparison.changes.findings]];
-    for (const [title, changes] of groups) {
-      lines.push('## ' + title, '');
-      if (title === 'Package changes' && !comparison.changes.inventoryAvailable) {
-        lines.push('Package inventory unavailable in one or both reports.', '');
-      } else if (!changes.length) {
-        lines.push('No changes.', '');
-      } else {
-        lines.push('| Name | Ecosystem | Change | Baseline | Target |', '| --- | --- | --- | --- | --- |');
-        for (const change of changes) {
-          lines.push('| ' + [change.name, change.ecosystem, change.status, change.before.join(', ') || '—', change.after.join(', ') || '—'].map(escape).join(' | ') + ' |');
+    const escape = (value: string) => value.replace(/[\r\n]/g, ' ').replace(/[\\|<>&`*\[\]]/g, character => '\\' + character);
+    const lines = ['# Release security changelog', '', '- Platform: ' + comparison.target.platform,
+      '- Vulnerability scanners: ' + comparison.scanners.map(escape).join(', ')];
+    const reports = [
+      ['Baseline', comparison.baseline, comparison.baselineDigest],
+      ['Target', comparison.target, comparison.targetDigest]
+    ] as const;
+    for (const [label, scan, digest] of reports) {
+      const url = new URL('/scans/' + scan.id, window.location.origin);
+      lines.push('- ' + label + ': [' + escape(scan.reference) + '](' + url.href + ') · ' + (scan.finishedAt ?? scan.createdAt)
+        + (digest ? ' · `' + digest + '`' : ''));
+    }
+    lines.push('', 'Detections describe these scan reports. Scanner or advisory database changes can affect the results.', '');
+    if (comparison.selected.length) {
+      lines.push('## Selected patch advisories', '');
+      for (const entry of comparison.selected) {
+        lines.push('- ' + escape(entry.id) + ' · ' + (entry.detected ? 'Still detected' : 'No longer detected'));
+      }
+      lines.push('');
+    }
+    for (const [status, change] of Object.entries(vulnerabilityChanges)) {
+      const items = comparison.changes.observations.filter(item => item.status === status);
+      lines.push('## ' + change.label + ' (' + items.length + ')', '');
+      if (items.length) {
+        lines.push('| Advisory and package | Ecosystem | Baseline | Target |', '| --- | --- | --- | --- |');
+        for (const item of items) {
+          lines.push('| ' + [item.name, item.ecosystem, item.before.join(', ') || '—', item.after.join(', ') || '—'].map(escape).join(' | ') + ' |');
         }
-        lines.push('');
+      } else {
+        lines.push('None reported.');
+      }
+      lines.push('');
+    }
+    lines.push('## Package changes', '');
+    if (!comparison.changes.inventoryAvailable) {
+      lines.push('Package inventory unavailable in one or both reports.');
+    } else if (!comparison.changes.packages.length) {
+      lines.push('No package versions changed.');
+    } else {
+      lines.push('| Package | Ecosystem | Change | Baseline | Target |', '| --- | --- | --- | --- | --- |');
+      for (const item of comparison.changes.packages) {
+        lines.push('| ' + [item.name, item.ecosystem, item.status, item.before.join(', ') || '—', item.after.join(', ') || '—'].map(escape).join(' | ') + ' |');
       }
     }
     const url = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' }));
     const link = document.createElement('a');
     link.href = url;
-    link.download = 'image-comparison.md';
+    link.download = 'release-security-changelog.md';
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 30_000);
   }
@@ -168,10 +217,20 @@
 
 <svelte:head><title>Report comparison · {productName}</title></svelte:head>
 <div class="page-heading">
-  <div><h1>Report comparison</h1><p>Review package version and vulnerability finding changes between reports.</p></div>
-  {#if result}<button class="button secondary" onclick={() => result && download(result)}><Download size={17} /> Download Markdown</button>{/if}
+  <div><h1>{publicationView ? 'Published image comparison' : 'Report comparison'}</h1><p>Review vulnerability observations and package version changes between reports.</p></div>
+  {#if result}<button class="button secondary" onclick={() => result && download(result)}><Download size={17} /> Download security changelog</button>{/if}
 </div>
 {#if issue}<div class="notice error" role="alert">{issue}</div>{/if}
+{#if publicationView}
+  {#if !waiting && !result && !issue}<p role="status">Loading published image scan…</p>{/if}
+  {#if waiting}
+    <div class="notice success" role="status">Waiting for the <a href={'/scans/' + waiting.target}>published image scan</a>.
+      <a href={'/scans/' + waiting.baseline}>Open source report</a>
+    </div>
+  {:else if issue}
+    <a class="button secondary" href="/patches">Back to patch history</a>
+  {/if}
+{:else}
 <div class="tabs">
   <button class:tab-active={mode === 'reports'} aria-pressed={mode === 'reports'} disabled={busy} onclick={() => {mode='reports';}}>Completed reports</button>
   {#if auth.operator}<button class:tab-active={mode === 'references'} aria-pressed={mode === 'references'} disabled={busy} onclick={showReferences}>Image references</button>{/if}
@@ -221,23 +280,18 @@
     </div>
   </form>
 {/if}
+{/if}
 
-{#snippet changes(items: Change[], empty: string, comparison?: Comparison)}
+{#snippet changes(items: Change[], empty: string)}
   {#if !items.length}
     <div class="compact-empty">{empty}</div>
   {:else}
     <div class="table-wrap"><table>
       <thead><tr><th>Name</th><th>Change</th><th>Baseline</th><th>Target</th></tr></thead>
       <tbody>{#each items as item}
-        {@const change = comparison ? vulnerabilityChanges[item.status] : undefined}
         <tr>
-          <td>
-            {#if comparison}
-              <a class="table-link mono" href={'/scans/' + (item.status === 'Removed' ? comparison.baseline.id : comparison.target.id) + '?' + new URLSearchParams({finding: item.name.split(' · ', 1)[0]})}>{item.name}</a>
-            {:else}<strong class="mono">{item.name}</strong>{/if}
-            <small>{item.ecosystem}</small>
-          </td>
-          <td><span class={'badge ' + (change?.tone ?? 'change-' + item.status.toLowerCase())} class:finding-change={!!change}>{change?.label ?? item.status}</span></td>
+          <td><strong class="mono">{item.name}</strong><small>{item.ecosystem}</small></td>
+          <td><span class={'badge change-' + item.status.toLowerCase()}>{item.status}</span></td>
           <td class="mono">{item.before.join(', ') || '—'}</td><td class="mono">{item.after.join(', ') || '—'}</td>
         </tr>
       {/each}</tbody>
@@ -246,21 +300,58 @@
 {/snippet}
 
 {#if result}
-  {#if result.baseline.platform !== result.target.platform}
-    <div class="notice warning" role="status">These reports use different platforms. Some changes may reflect architecture differences.</div>
-  {/if}
+  {@const comparison = result}
+  {@const observations = comparison.changes.observations.filter(item => !detectionFilter || item.status === detectionFilter)}
   <section class="panel">
     <div class="panel-title">
-      <div><h2>Vulnerability changes</h2><p>{imageName(result.baseline.reference)} → {imageName(result.target.reference)}</p></div>
-      {#if result.changes.findings.length}<div class="filters">
-        {#each Object.entries(vulnerabilityChanges) as [status, change] (status)}
-          {@const count = result.changes.findings.filter(finding => finding.status === status).length}
-          {#if count}<span class={'badge finding-change ' + change.tone}>{count} {change.label.toLowerCase()}</span>{/if}
-        {/each}
-      </div>{/if}
+      <div><h2>Release security changelog</h2>
+        <p><a class="table-link" href={'/scans/' + comparison.baseline.id}>{imageName(comparison.baseline.reference)}</a>
+          → <a class="table-link" href={'/scans/' + comparison.target.id}>{comparison.publication ? 'Published scan' : imageName(comparison.target.reference)}</a>
+          · {comparison.target.platform} · {comparison.scanners.join(', ')}</p>
+        {#if comparison.publication}<p class="mono break">{comparison.target.reference}</p>{/if}
+      </div>
     </div>
-    {@render changes(result.changes.findings, 'No vulnerability findings changed.', result)}
-    <div class="panel-footer field-help">Changes can reflect updates to the vulnerability database.</div>
+    {#if comparison.selected.length}
+      <div class="panel-footer">
+        <h3>Selected patch advisories</h3>
+        <ul>
+          {#each comparison.selected as entry (entry.id)}
+            <li><a class="table-link mono" href={findingReportPath(entry.detected ? comparison.target.id : comparison.baseline.id, entry.id, true)}>{entry.id}</a>
+              · {entry.detected ? 'Still detected' : 'No longer detected'}</li>
+          {/each}
+        </ul>
+      </div>
+    {/if}
+    <div class="panel-footer field-help">Each row pairs an advisory and package. Updates to scanner data can affect detections.</div>
+    <div class="panel-footer filters" aria-label="Vulnerability observation filters">
+      <button class="button secondary" aria-pressed={!detectionFilter} onclick={() => detectionFilter = ''}>All observations</button>
+      {#each Object.keys(vulnerabilityChanges) as key (key)}
+        {@const status = key as Observation['status']}
+        {@const total = comparison.changes.observations.filter(item => item.status === status).length}
+        <button class="button secondary" aria-pressed={detectionFilter === status} onclick={() => detectionFilter = status}>
+          {vulnerabilityChanges[status].label} · {total}
+        </button>
+      {/each}
+    </div>
+    {#if observations.length}
+      <div class="table-wrap"><table>
+        <thead><tr><th>Advisory and package</th><th>Observation</th><th>Baseline</th><th>Target</th></tr></thead>
+        <tbody>{#each observations as item}
+          {@const state = vulnerabilityChanges[item.status]}
+          {@const beforeIssue = Object.hasOwn(comparison.baselineIssues, item.advisory) ? comparison.baselineIssues[item.advisory] : undefined}
+          {@const afterIssue = Object.hasOwn(comparison.targetIssues, item.advisory) ? comparison.targetIssues[item.advisory] : undefined}
+          <tr>
+            <td><a class="table-link mono" href={findingReportPath(item.status === 'Removed' ? comparison.baseline.id : comparison.target.id, item.advisory, true)}>{item.name}</a>
+              <small>{item.ecosystem}</small></td>
+            <td><span class={'badge finding-change ' + state.tone}>{state.label}</span></td>
+            <td class="mono">{item.before.join(', ') || '—'}{#if item.before.length && beforeIssue}<small><IssueLink issue={beforeIssue} /></small>{/if}</td>
+            <td class="mono">{item.after.join(', ') || '—'}{#if item.after.length && afterIssue}<small><IssueLink issue={afterIssue} /></small>{/if}</td>
+          </tr>
+        {/each}</tbody>
+      </table></div>
+    {:else}
+      <div class="compact-empty">No observations in this view.</div>
+    {/if}
   </section>
   <section class="panel">
     <div class="panel-title"><div><h2>Package changes</h2></div><span class="badge neutral">{result.changes.packages.length}</span></div>

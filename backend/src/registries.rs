@@ -15,6 +15,8 @@ use serde_json::{Value, json};
 use std::{sync::LazyLock, time::Duration};
 use url::Url;
 
+mod cloud;
+
 pub const PROVIDERS: &[&str] = &[
     "oci",
     "dockerhub",
@@ -27,6 +29,7 @@ pub const PROVIDERS: &[&str] = &[
     "nexus",
     "artifactory",
     "gitea",
+    "forgejo",
     "quay",
 ];
 static PARAM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"([a-zA-Z_]+)="([^"]*)""#).unwrap());
@@ -103,6 +106,33 @@ impl Options {
     }
 }
 
+fn workload(auth: Option<&Credentials>) -> bool {
+    auth.is_some_and(|auth| auth.username == cloud::MARKER && auth.password == cloud::MARKER)
+}
+
+fn validate_workload(
+    app: &App,
+    host: &str,
+    secret: Option<&[u8]>,
+    options: &Options,
+) -> ApiResult<()> {
+    if let Some(secret) = secret
+        && workload(Some(&app.0.vault.open_secret(host, secret)?))
+    {
+        let provider = cloud::provider(host).map_err(ApiError::bad)?;
+        if options.provider.as_deref() != Some(provider.name())
+            || options.protocol.as_deref().unwrap_or("https") != "https"
+            || options.skip_tls
+            || options.auth_host.is_some()
+        {
+            return Err(ApiError::bad(
+                "Workload identity requires the matching provider and verified HTTPS on the registry host.",
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub async fn add(
     app: &App,
     name: &str,
@@ -110,6 +140,7 @@ pub async fn add(
     secret: Option<Vec<u8>>,
     options: Options,
 ) -> ApiResult<crate::store::Registry> {
+    validate_workload(app, host, secret.as_deref(), &options)?;
     let id = uuid::Uuid::now_v7();
     let mut tx = app.0.database.primary.begin().await?;
     let registry = sqlx::query_scalar!(
@@ -204,6 +235,7 @@ async fn update(
     } else {
         old
     };
+    validate_workload(&app, &host, secret.as_deref(), &options)?;
     sqlx::query!(
         "UPDATE registry_profiles SET name=$2,secret=$3 WHERE id=$1",
         key,
@@ -271,20 +303,34 @@ async fn test_saved(
     Path(id): Path<String>,
     Json(input): Json<TestTarget>,
 ) -> ApiResult<Json<Value>> {
-    let connection = connection(&app, &id).await?;
+    let mut connection = connection(&app, &id).await?;
     let reference =
         ImageReference::parse(&input.reference, Some(&connection.host)).map_err(ApiError::bad)?;
-    let protocol = input.protocol.as_deref().unwrap_or(&connection.protocol);
-    if !matches!(protocol, "https" | "http") {
-        return Err(ApiError::bad("Choose HTTPS or HTTP for the registry."));
+    if let Some(protocol) = input.protocol {
+        if !matches!(protocol.as_str(), "https" | "http") {
+            return Err(ApiError::bad("Choose HTTPS or HTTP for the registry."));
+        }
+        connection.protocol = protocol;
     }
-    crate::scanner::test(
-        &reference,
-        connection.auth,
-        protocol == "http" || input.skip_tls.unwrap_or(connection.skip_tls),
-    )
-    .await
-    .map_err(ApiError::bad)?;
+    if let Some(skip_tls) = input.skip_tls {
+        connection.skip_tls = skip_tls;
+    }
+    if matches!(
+        connection.provider.as_str(),
+        "ghcr" | "forgejo" | "ecr" | "acr"
+    ) {
+        manifest(&connection, &reference)
+            .await
+            .map_err(ApiError::bad)?;
+    } else {
+        crate::scanner::test(
+            &reference,
+            connection.auth,
+            connection.protocol == "http" || connection.skip_tls,
+        )
+        .await
+        .map_err(ApiError::bad)?;
+    }
     Ok(Json(json!({"reference":reference.value})))
 }
 
@@ -337,7 +383,82 @@ fn allowed_realm(base: &str, protocol: &str, realm: &Url, explicit: Option<&str>
             .is_some_and(|prefix| prefix.ends_with('.') && host.contains('.'))
 }
 
-async fn get(connection: &Connection, path: &str, query: &[(&str, &str)]) -> Result<Response> {
+#[derive(Clone, Copy)]
+enum OciOperation {
+    Catalog,
+    Tags,
+    Manifest,
+}
+
+impl OciOperation {
+    fn failed(self, status: reqwest::StatusCode, token_exchange: bool) -> anyhow::Error {
+        let hint = match self {
+            Self::Catalog => {
+                "Check catalog-list permission. You can still test a known image by tag or digest."
+            }
+            Self::Tags => {
+                "Check access to list tags for this repository. Try an exact tag or digest if you know one."
+            }
+            Self::Manifest => {
+                "Check the exact repository, tag or digest and the credential’s pull permission."
+            }
+        };
+        let operation = match self {
+            Self::Catalog => "OCI catalog listing",
+            Self::Tags => "OCI tag listing",
+            Self::Manifest => "Exact image manifest lookup",
+        };
+        let phase = if token_exchange {
+            " token exchange"
+        } else {
+            ""
+        };
+        anyhow!(
+            "{operation}{phase} returned HTTP {}. {hint}",
+            status.as_u16()
+        )
+    }
+}
+
+const MANIFEST_TYPES: &str = "application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json";
+
+async fn manifest(connection: &Connection, reference: &ImageReference) -> Result<()> {
+    let (_, exact) = reference.value.split_once('/').unwrap();
+    let (repository, target) = exact
+        .rsplit_once('@')
+        .or_else(|| exact.rsplit_once(':'))
+        .unwrap();
+    let response = get(
+        connection,
+        &format!("/v2/{repository}/manifests/{target}"),
+        &[],
+        OciOperation::Manifest,
+    )
+    .await?;
+    let payload: Value = response
+        .json()
+        .await
+        .map_err(|_| anyhow!("The registry did not return an image manifest."))?;
+    anyhow::ensure!(
+        payload["schemaVersion"] == 2,
+        "The registry did not return a supported image manifest."
+    );
+    Ok(())
+}
+
+async fn get(
+    connection: &Connection,
+    path: &str,
+    query: &[(&str, &str)],
+    operation: OciOperation,
+) -> Result<Response> {
+    let managed = workload(connection.auth.as_ref());
+    if managed {
+        anyhow::ensure!(
+            connection.protocol == "https" && !connection.skip_tls,
+            "Workload identity requires verified HTTPS."
+        );
+    }
     let client = client(connection.skip_tls)?;
     let host = if connection.host == "docker.io" {
         "registry-1.docker.io"
@@ -345,25 +466,37 @@ async fn get(connection: &Connection, path: &str, query: &[(&str, &str)]) -> Res
         &connection.host
     };
     let endpoint = format!("{}://{host}{path}", connection.protocol);
-    let response = client
-        .get(&endpoint)
-        .query(query)
-        .send()
-        .await
-        .map_err(|_| anyhow!("Could not contact the registry."))?;
+    let request = || {
+        let request = client.get(&endpoint).query(query);
+        if matches!(operation, OciOperation::Manifest) {
+            request.header(reqwest::header::ACCEPT, MANIFEST_TYPES)
+        } else {
+            request
+        }
+    };
+    let send_error = |_| anyhow!("Could not contact the registry.");
+    let check = |response: Response, token_exchange| {
+        if response.status().is_success() {
+            Ok(response)
+        } else {
+            Err(operation.failed(response.status(), token_exchange))
+        }
+    };
+    let response = request().send().await.map_err(send_error)?;
     if response.status() != reqwest::StatusCode::UNAUTHORIZED {
-        return checked(response);
+        return check(response, false);
     }
-    let auth = pull_credentials(&connection.host, connection.auth.clone()).await?;
     let challenge = response
         .headers()
-        .get(WWW_AUTHENTICATE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
-    if challenge
-        .get(..7)
-        .is_some_and(|value| value.eq_ignore_ascii_case("bearer "))
-    {
+        .get_all(WWW_AUTHENTICATE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find(|challenge| {
+            challenge
+                .get(..7)
+                .is_some_and(|value| value.eq_ignore_ascii_case("bearer "))
+        });
+    if let Some(challenge) = challenge {
         let parameters: std::collections::HashMap<_, _> = PARAM
             .captures_iter(challenge)
             .map(|capture| {
@@ -375,28 +508,62 @@ async fn get(connection: &Connection, path: &str, query: &[(&str, &str)]) -> Res
             .collect();
         let realm = Url::parse(parameters.get("realm").copied().unwrap_or_default())
             .map_err(|_| anyhow!("The registry sent an invalid authentication challenge."))?;
-        if !allowed_realm(
-            &connection.host,
-            &connection.protocol,
-            &realm,
-            connection.auth_host.as_deref(),
-        ) {
-            bail!("Configure the registry’s HTTPS token host before browsing its catalog.");
-        }
-        let mut request = client.get(realm);
+        let allowed = if managed {
+            realm.scheme() == "https"
+                && realm.host_str() == Some(host)
+                && realm.port().is_none()
+                && realm.username().is_empty()
+                && realm.password().is_none()
+        } else {
+            allowed_realm(
+                &connection.host,
+                &connection.protocol,
+                &realm,
+                connection.auth_host.as_deref(),
+            )
+        };
+        anyhow::ensure!(
+            allowed,
+            "The registry sent an untrusted token host. Check the connection’s token host setting."
+        );
+        let auth = connection_credentials(connection).await?;
+        let mut token_request = client.get(realm.clone());
         for key in ["service", "scope"] {
             if let Some(value) = parameters.get(key) {
-                request = request.query(&[(key, *value)]);
+                token_request = token_request.query(&[(key, *value)]);
             }
         }
         if let Some(auth) = &auth {
-            request = request.basic_auth(&auth.username, Some(&auth.password));
+            token_request = if connection.provider == "acr" && auth.username == cloud::ACR_USER {
+                let service = parameters.get("service").copied().unwrap_or(host);
+                anyhow::ensure!(
+                    realm.path() == "/oauth2/token"
+                        && service == host
+                        && realm.scheme() == "https"
+                        && realm.host_str() == Some(host)
+                        && realm.port().is_none()
+                        && !connection.skip_tls,
+                    "ACR returned an unexpected token endpoint."
+                );
+                client.post(realm).form(&[
+                    ("grant_type", "refresh_token"),
+                    ("service", service),
+                    (
+                        "scope",
+                        parameters.get("scope").copied().unwrap_or_default(),
+                    ),
+                    ("refresh_token", auth.password.as_str()),
+                ])
+            } else {
+                token_request.basic_auth(&auth.username, Some(&auth.password))
+            };
         }
-        let token: Value = checked(
-            request
+        let token: Value = check(
+            token_request
                 .send()
                 .await
                 .map_err(|_| anyhow!("Registry token exchange failed."))?,
+            true,
         )?
         .json()
         .await
@@ -405,27 +572,25 @@ async fn get(connection: &Connection, path: &str, query: &[(&str, &str)]) -> Res
             .as_str()
             .or_else(|| token["access_token"].as_str())
             .ok_or_else(|| anyhow!("The registry did not return a token."))?;
-        checked(
-            client
-                .get(endpoint)
-                .query(query)
+        check(
+            request()
                 .bearer_auth(token)
                 .send()
                 .await
-                .map_err(|_| anyhow!("Could not contact the registry."))?,
+                .map_err(send_error)?,
+            false,
         )
-    } else if let Some(auth) = &auth {
-        checked(
-            client
-                .get(endpoint)
-                .query(query)
+    } else if let Some(auth) = connection_credentials(connection).await? {
+        check(
+            request()
                 .basic_auth(&auth.username, Some(&auth.password))
                 .send()
                 .await
-                .map_err(|_| anyhow!("Could not contact the registry."))?,
+                .map_err(send_error)?,
+            false,
         )
     } else {
-        checked(response)
+        check(response, false)
     }
 }
 
@@ -453,7 +618,7 @@ async fn fetch_catalog(app: &App, id: &str) -> ApiResult<()> {
             } else {
                 vec![("n", "100"), ("last", &last)]
             };
-            let response = get(&connection, "/v2/_catalog", &query).await?;
+            let response = get(&connection, "/v2/_catalog", &query, OciOperation::Catalog).await?;
             let more = response.headers().contains_key(reqwest::header::LINK);
             let data: Value = response
                 .json()
@@ -597,6 +762,7 @@ async fn tags(
         &connection,
         &format!("/v2/{image}/tags/list"),
         &[("n", "1000")],
+        OciOperation::Tags,
     )
     .await;
     let response = match result {
@@ -688,10 +854,17 @@ pub async fn sync(app: App) {
 
 async fn provider_catalog(connection: &Connection) -> Result<Option<Vec<String>>> {
     let Some(namespace) = connection.namespace.as_deref() else {
+        if matches!(connection.provider.as_str(), "ghcr" | "forgejo") {
+            bail!(
+                "Set the package owner namespace to browse this registry’s catalog. You can look up tags or test a known image by tag or digest."
+            );
+        }
         return Ok(None);
     };
-    let http =
-        client(connection.skip_tls && matches!(connection.provider.as_str(), "gitea" | "nexus"))?;
+    let http = client(
+        connection.skip_tls
+            && matches!(connection.provider.as_str(), "gitea" | "forgejo" | "nexus"),
+    )?;
     let images: Vec<String> = match connection.provider.as_str() {
         "dockerhub" if connection.host == "docker.io" => {
             let mut request = http
@@ -723,31 +896,7 @@ async fn provider_catalog(connection: &Connection) -> Result<Option<Vec<String>>
                 .collect()
         }
         "ghcr" if connection.host == "ghcr.io" => {
-            let auth = connection
-                .auth
-                .as_ref()
-                .ok_or_else(|| anyhow!("Add a GitHub token with read:packages."))?;
-            let fetch = |kind: &str| {
-                http.get(format!(
-                    "https://api.github.com/{kind}/{namespace}/packages"
-                ))
-                .query(&[("package_type", "container"), ("per_page", "100")])
-                .header("Accept", "application/vnd.github+json")
-                .bearer_auth(&auth.password)
-                .send()
-            };
-            let organization = fetch("orgs").await?;
-            let response = if organization.status() == reqwest::StatusCode::NOT_FOUND {
-                fetch("users").await?
-            } else {
-                organization
-            };
-            let payload: Vec<Value> = checked(response)?.json().await?;
-            payload
-                .iter()
-                .filter_map(|entry| entry["name"].as_str())
-                .map(|name| format!("{namespace}/{name}"))
-                .collect()
+            github_catalog(connection, &http, "https://api.github.com", namespace).await?
         }
         "gitlab" if connection.host == "registry.gitlab.com" || connection.auth_host.is_some() => {
             let auth = connection
@@ -778,12 +927,13 @@ async fn provider_catalog(connection: &Connection) -> Result<Option<Vec<String>>
                 .map(str::to_owned)
                 .collect()
         }
-        "gitea" => {
+        "gitea" | "forgejo" => {
             let host = connection.auth_host.as_deref().unwrap_or(&connection.host);
             let mut url = Url::parse(&format!("{}://{host}/api/v1/packages", connection.protocol))?;
             url.path_segments_mut()
                 .map_err(|_| anyhow!("Invalid Gitea API host."))?
                 .push(namespace);
+            let owner = namespace.to_ascii_lowercase();
             let mut packages = Vec::new();
             for page in 1..=10 {
                 let mut request = http.get(url.clone()).query(&[
@@ -797,7 +947,24 @@ async fn provider_catalog(connection: &Connection) -> Result<Option<Vec<String>>
                         format!("token {}", auth.password),
                     );
                 }
-                let entries: Vec<Value> = checked(request.send().await?)?.json().await?;
+                let response = request
+                    .send()
+                    .await
+                    .map_err(|_| anyhow!("Could not contact the package catalog API."))?;
+                anyhow::ensure!(
+                    response.status().is_success(),
+                    "{} package catalog returned HTTP {}. Check the namespace, package visibility, and the access token’s read:package scope.",
+                    if connection.provider == "forgejo" {
+                        "Forgejo"
+                    } else {
+                        "Gitea"
+                    },
+                    response.status().as_u16()
+                );
+                let entries: Vec<Value> = response
+                    .json()
+                    .await
+                    .map_err(|_| anyhow!("The package catalog API returned invalid packages."))?;
                 if entries.is_empty() {
                     break;
                 }
@@ -805,7 +972,7 @@ async fn provider_catalog(connection: &Connection) -> Result<Option<Vec<String>>
                     entries
                         .iter()
                         .filter_map(|item| item["name"].as_str())
-                        .map(|name| format!("{namespace}/{name}")),
+                        .map(|name| format!("{owner}/{name}")),
                 );
             }
             packages
@@ -854,6 +1021,58 @@ async fn provider_catalog(connection: &Connection) -> Result<Option<Vec<String>>
     Ok(Some(images))
 }
 
+async fn github_catalog(
+    connection: &Connection,
+    http: &Client,
+    origin: &str,
+    namespace: &str,
+) -> Result<Vec<String>> {
+    let auth = connection.auth.as_ref().ok_or_else(|| anyhow!(
+        "GitHub package catalog requires a classic personal access token with read:packages. You can look up public image tags or test a known public image anonymously."
+    ))?;
+    let owner = namespace.to_ascii_lowercase();
+    let mut images = Vec::new();
+    let mut kind = "orgs";
+    for page in 1..=100 {
+        let fetch = |kind| {
+            http.get(format!("{origin}/{kind}/{namespace}/packages"))
+                .query(&[
+                    ("package_type", "container"),
+                    ("per_page", "100"),
+                    ("page", &page.to_string()),
+                ])
+                .header("Accept", "application/vnd.github+json")
+                .bearer_auth(&auth.password)
+                .send()
+        };
+        let unavailable = |_| anyhow!("Could not contact the GitHub package catalog API.");
+        let mut response = fetch(kind).await.map_err(unavailable)?;
+        if page == 1 && response.status() == reqwest::StatusCode::NOT_FOUND {
+            kind = "users";
+            response = fetch(kind).await.map_err(unavailable)?;
+        }
+        anyhow::ensure!(
+            response.status().is_success(),
+            "GitHub package catalog returned HTTP {}. Check the owner namespace, classic token read:packages scope, organization SSO authorization, and package access. You can still look up OCI tags or test an exact image separately.",
+            response.status().as_u16()
+        );
+        let entries: Vec<Value> = response
+            .json()
+            .await
+            .map_err(|_| anyhow!("GitHub returned an invalid package catalog."))?;
+        images.extend(
+            entries
+                .iter()
+                .filter_map(|entry| entry["name"].as_str())
+                .map(|name| format!("{owner}/{name}")),
+        );
+        if entries.len() < 100 {
+            return Ok(images);
+        }
+    }
+    bail!("The GitHub package catalog exceeded the supported page limit.")
+}
+
 async fn nexus_entries(
     connection: &Connection,
     http: &Client,
@@ -892,10 +1111,26 @@ async fn nexus_entries(
     Ok(entries)
 }
 
+async fn connection_credentials(connection: &Connection) -> Result<Option<Credentials>> {
+    if workload(connection.auth.as_ref()) {
+        return cloud::resolve(&connection.host).await.map(Some);
+    }
+    pull_credentials(&connection.host, connection.auth.clone()).await
+}
+
 pub async fn pull_credentials(
     host: &str,
     credentials: Option<Credentials>,
 ) -> Result<Option<Credentials>> {
+    if let Some(auth) = &credentials
+        && auth.username == cloud::MARKER
+    {
+        anyhow::ensure!(
+            cloud::is_scanner_marker(auth),
+            "Save a verified HTTPS registry connection before using server workload identity."
+        );
+        return cloud::resolve(host).await.map(Some);
+    }
     if let Some(auth) = &credentials
         && host.ends_with("-docker.pkg.dev")
         && matches!(auth.username.as_str(), "_json_key" | "_json_key_base64")
@@ -979,7 +1214,18 @@ pub async fn credential_record(app: &App, id: &str) -> Result<Option<(String, Op
         return Ok(None);
     };
     Ok(sqlx::query!("SELECT r.host,p.secret FROM registry_profiles p JOIN registries r ON p.registry_id=r.id WHERE p.id=$1",id)
-        .fetch_optional(&app.0.database.primary).await?.map(|r|(r.host,r.secret)))
+        .fetch_optional(&app.0.database.primary).await?
+        .map(|row| -> Result<_> {
+            let mut secret = row.secret;
+            if cloud::provider(&row.host).is_ok()
+                && let Some(value) = &secret
+                && workload(Some(&app.0.vault.open_secret(&row.host, value)?))
+            {
+                secret = Some(app.0.vault.seal(&row.host, &cloud::scanner_marker()?)?);
+            }
+            Ok((row.host, secret))
+        })
+        .transpose()?)
 }
 
 #[derive(Deserialize, Default)]
@@ -1053,3 +1299,6 @@ pub async fn list(
         ),
     ))
 }
+
+#[cfg(test)]
+mod tests;

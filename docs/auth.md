@@ -6,10 +6,10 @@ Certhia requires a signed-in user for the dashboard and its API. Use HTTPS for s
 
 Choose either method before opening Certhia to users.
 
-- **Browser setup.** Open the dashboard and enter the setup code, your email, display name, and a password. On an empty database, Certhia prints a random setup code to its startup logs. In Compose, use `docker compose logs app` to find it. Protect access to these logs during setup. You can instead supply a high-entropy code with `CERTHIA_SETUP_TOKEN` or `CERTHIA_SETUP_TOKEN_FILE`. Configure the same code on all replicas if you use browser setup behind a load balancer. The screen closes as soon as any replica creates the first user. Restarting a replica before setup replaces its generated code.
+- **Browser setup.** Open the dashboard and enter a username and a password. A username can be an email address if you plan to link single sign-on accounts by email. Whoever opens the setup screen first creates the administrator, so finish setup before exposing Certhia to other people. To gate the screen, set a high-entropy code with `CERTHIA_SETUP_TOKEN` or `CERTHIA_SETUP_TOKEN_FILE`; the screen then asks for it. Configure the same code on all replicas behind a load balancer. The screen closes as soon as the first user exists. Choose the default scanners, then scan a public image or import a report. Administrators can change scanner defaults or configure an issue tracker later in **Workspace preferences**.
 - **Environment setup.** Set `CERTHIA_ADMIN_EMAIL` and either `CERTHIA_ADMIN_PASSWORD` or `CERTHIA_ADMIN_PASSWORD_FILE` before starting Certhia. The server creates an account named **Administrator** only if the database has no users. Remove the bootstrap variables and any bootstrap secret mount after the account is created. Changing a bootstrap credential after installation has no effect on the account.
 
-Passwords need at least 12 characters and can be up to 1024 bytes. Certhia rejects a short list of common passwords and stores a salted Argon2id hash using 19 MiB of memory, two iterations, and one lane. [OWASP password storage guidance](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)
+Passwords need at least 8 characters and can be up to 1024 bytes. Certhia rejects a short list of common passwords and stores a salted Argon2id hash using 19 MiB of memory, two iterations, and one lane. [OWASP password storage guidance](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)
 
 ## Roles and session management
 
@@ -36,6 +36,8 @@ CERTHIA_AUTH_SECURE_COOKIE=1
 `CERTHIA_ALLOWED_HOSTS` contains bare hostnames or IP literals. Keep `127.0.0.1` if using the image's built-in Docker health check. Kubernetes health probes can supply an allowed internal `Host`. A configured origin includes the scheme and any non-default port, with no path. All browser mutations require an exact `Origin` that matches the request authority and, when set, the configured origin.
 
 The server defaults to `CERTHIA_AUTH_SECURE_COOKIE=1`. Compose selects `0` for its default loopback HTTP setup. Only use `0` with loopback hostnames and an HTTP listener that is private to the local machine. With secure cookies, Certhia sets `__Host-certhia_session`. Cookies are HttpOnly, SameSite=Lax, and host-only.
+
+Set `CERTHIA_AUTH_SECURE_COOKIE=auto` when the same instance is reached over HTTPS and over plain HTTP on a trusted network, for example a TLS hostname plus a LAN or VPN address. Sign-in then works on both, the `Origin` check accepts either scheme for the requested host, and the session cookie `certhia_session` omits the Secure attribute. Anyone who can watch the plain-HTTP traffic can read that cookie, so use `auto` only on networks you trust.
 
 Login attempts are limited across replicas to 10 per account and 50 per client IP per five-minute window. By default, Certhia uses the TCP peer address. Behind a proxy, that can put everyone in one rate-limit bucket. To use the actual client IP, set `CERTHIA_AUTH_TRUSTED_PROXIES` to a comma-separated list of the **immediate** proxy IP addresses. Configure those proxies to overwrite `X-Real-IP` with the validated client address and restrict direct access to Certhia. Certhia ignores the header from other peers.
 

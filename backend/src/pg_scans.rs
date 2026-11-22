@@ -106,34 +106,43 @@ impl Database {
         if scan.status != "completed" {
             return Ok(Some(ScanDetail { scan, report: None }));
         }
-        let manifest=sqlx::query!("SELECT d.id,d.digest,d.os,d.size,s.inventory_available,sd.observed_order
-            FROM scan_directory sd JOIN scans s USING(id,queued_at) JOIN digests d ON d.id=s.digest_id WHERE sd.id=$1",id)
-            .fetch_one(&mut *tx).await?;
+        let (manifest, digest, os, size, inventory_available, scan_no, observed_order, complete, scanner) =
+            sqlx::query_as::<_, (i64, String, Option<String>, Option<i64>, bool, i64, Option<i64>, Option<bool>, Option<String>)>(
+                "SELECT d.id,d.digest,d.os,d.size,s.inventory_available,sd.scan_no,sd.observed_order,s.observation_complete,s.scanner
+                FROM scan_directory sd JOIN scans s USING(id,queued_at) JOIN digests d ON d.id=s.digest_id WHERE sd.id=$1",
+            )
+            .bind(id).fetch_one(&mut *tx).await?;
         let packages=sqlx::query_as!(Package,"SELECT DISTINCT e.name AS ecosystem,p.name,p.version,p.purl,nullif(dp.layer_index,-1) AS layer_index FROM digest_packages dp
             JOIN packages p ON p.id=dp.package_id JOIN ecosystems e ON e.id=p.ecosystem_id WHERE dp.digest_id=$1
-            ORDER BY ecosystem,p.name,p.version",manifest.id).fetch_all(&mut *tx).await?;
-        let findings=sqlx::query_as!(Finding,r#"SELECT a.external_id AS id,e.name AS ecosystem,p.name AS package,p.version AS installed,p.purl,
-            coalesce(v.version,'') AS "fixed!",upper(s.name) AS "severity!",coalesce(a.summary,'') AS "title!"
-            FROM scan_finding_keys($1,$2) k JOIN packages p ON p.id=k.package_id JOIN ecosystems e ON e.id=p.ecosystem_id
-            JOIN advisories a ON a.id=k.advisory_id JOIN severities s ON s.id=a.severity_id
-            JOIN findings f ON f.digest_id=$1 AND f.package_id=k.package_id AND f.advisory_id=k.advisory_id
-            LEFT JOIN fix_versions v ON v.id=f.fixed_in ORDER BY a.external_id,p.name"#,manifest.id,manifest.observed_order)
-            .fetch_all(&mut *tx).await?;
+            ORDER BY ecosystem,p.name,p.version",manifest).fetch_all(&mut *tx).await?;
+        let findings=sqlx::query_as::<_, Finding>("SELECT a.external_id AS id,e.name AS ecosystem,p.name AS package,p.version AS installed,p.purl,
+            coalesce(v.version,'') AS fixed,upper(s.name) AS severity,coalesce(k.title,'') AS title
+            FROM observed_findings($1,$2,$3,$4) k JOIN packages p ON p.id=k.package_id JOIN ecosystems e ON e.id=p.ecosystem_id
+            JOIN advisories a ON a.id=k.advisory_id JOIN severities s ON s.id=k.severity_id
+            LEFT JOIN fix_versions v ON v.id=k.fixed_in ORDER BY a.external_id,p.name")
+            .bind(manifest).bind(observed_order).bind(scan_no).bind(complete.is_some()).fetch_all(&mut *tx).await?;
         let checks=sqlx::query_as!(Check,"SELECT category,external_id AS id,target,severity,title,detail FROM scan_checks WHERE scan_id=$1 ORDER BY ordinal",id)
             .fetch_all(&mut *tx).await?;
         tx.commit().await?;
         let report = Report {
+            evidence_available: None,
+            scanners: scanner
+                .as_deref()
+                .into_iter()
+                .flat_map(|names| names.split(','))
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .collect(),
             packages,
             findings,
-            inventory_available: manifest.inventory_available,
-            digest: manifest
-                .digest
-                .starts_with("sha256:")
-                .then_some(manifest.digest),
+            inventory_available,
+            digest: digest.starts_with("sha256:").then_some(digest),
+            observation_complete: complete,
             counts: scan.counts.clone().unwrap_or_default(),
             checks,
-            size_bytes: manifest.size.map(u64::try_from).transpose()?,
-            os: manifest.os,
+            size_bytes: size.map(u64::try_from).transpose()?,
+            os,
         };
         Ok(Some(ScanDetail {
             scan,

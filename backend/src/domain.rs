@@ -111,18 +111,110 @@ pub struct Package {
     pub version: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Ord, PartialOrd)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Ord, PartialOrd, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct Finding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purl: Option<String>,
     pub id: String,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub detected_by: Vec<String>,
     pub ecosystem: String,
     pub package: String,
     pub installed: String,
     pub fixed: String,
     pub severity: String,
     pub title: String,
+}
+
+static ADVISORY_ID: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:CVE-[0-9]{4}-[0-9]{4,}|GHSA-[23456789cfghjmpqrvwx]{4}-[23456789cfghjmpqrvwx]{4}-[23456789cfghjmpqrvwx]{4})$").unwrap()
+});
+
+/// Only structured scanner identifiers can establish a cross-database advisory identity.
+pub fn advisory_identity<'a>(
+    primary: &str,
+    aliases: impl IntoIterator<Item = &'a str>,
+) -> (String, Vec<String>) {
+    let mut ids: BTreeSet<String> = aliases
+        .into_iter()
+        .filter(|id| ADVISORY_ID.is_match(id))
+        .map(str::to_owned)
+        .collect();
+    ids.remove(primary);
+    let mut cves = ids.iter().filter(|id| id.starts_with("CVE-"));
+    let cve = cves.next().cloned();
+    if cve.is_some() && (cves.next().is_some() || primary.starts_with("CVE-")) {
+        return (primary.to_owned(), Vec::new());
+    }
+    if let Some(cve) = cve {
+        ids.remove(&cve);
+        ids.insert(primary.to_owned());
+        return (cve, ids.into_iter().collect());
+    }
+    (primary.to_owned(), ids.into_iter().collect())
+}
+
+impl Finding {
+    pub fn record_aliases<'a>(&mut self, ids: impl IntoIterator<Item = &'a str>) {
+        (self.id, self.aliases) = advisory_identity(&self.id, ids);
+    }
+}
+
+pub fn merge_findings(rows: impl Iterator<Item = Finding>) -> Vec<Finding> {
+    let mut findings: BTreeMap<_, Finding> = BTreeMap::new();
+    for finding in rows {
+        let key = (
+            finding.id.clone(),
+            finding.ecosystem.clone(),
+            finding.package.clone(),
+            finding.installed.clone(),
+            finding.purl.clone(),
+        );
+        let existing = findings.entry(key).or_insert_with(|| finding.clone());
+        existing.aliases.extend(finding.aliases);
+        existing.aliases.sort();
+        existing.aliases.dedup();
+        if severity_rank(&finding.severity) > severity_rank(&existing.severity) {
+            existing.severity = finding.severity;
+        }
+        if existing.title.is_empty() {
+            existing.title = finding.title;
+        }
+        if existing.fixed.is_empty() {
+            existing.fixed = finding.fixed;
+        }
+    }
+    findings.into_values().collect()
+}
+
+pub fn severity_rank(severity: &str) -> u8 {
+    match severity {
+        "CRITICAL" => 4,
+        "HIGH" => 3,
+        "MEDIUM" => 2,
+        "LOW" => 1,
+        _ => 0,
+    }
+}
+
+pub fn scanner_names(ids: &[String]) -> String {
+    ids.iter()
+        .map(|id| match id.as_str() {
+            "trivy" => "Trivy",
+            "grype" => "Grype",
+            "syft" => "Syft",
+            "osv" => "OSV-Scanner",
+            "dockle" => "Dockle",
+            "dive" => "Dive",
+            other => other,
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -136,13 +228,19 @@ pub struct Counts {
     pub packages: usize,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Report {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_available: Option<bool>,
+    #[serde(default)]
+    pub scanners: Vec<String>,
     pub packages: Vec<Package>,
     pub findings: Vec<Finding>,
     pub inventory_available: bool,
     pub digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_complete: Option<bool>,
     pub counts: Counts,
     #[serde(default)]
     pub checks: Vec<Check>,
@@ -201,6 +299,14 @@ impl Captured {
         for result in raw["Results"].as_array().into_iter().flatten() {
             for finding in result["Vulnerabilities"].as_array().into_iter().flatten() {
                 if let Some(id) = finding["VulnerabilityID"].as_str() {
+                    let (id, _) = advisory_identity(
+                        id,
+                        finding["VendorIDs"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|v| v.as_str()),
+                    );
                     let cvss = finding["CVSS"]
                         .as_object()
                         .and_then(|v| v.get("nvd").or_else(|| v.values().next()));
@@ -261,6 +367,7 @@ struct TrivyMetadata {
     #[serde(default, rename = "DiffIDs")]
     diff_ids: Option<Vec<String>>,
     size: Option<u64>,
+    #[serde(rename = "OS", alias = "Os")]
     os: Option<TrivyOs>,
 }
 
@@ -284,8 +391,8 @@ struct TrivyResult {
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct TrivyOs {
-    family: String,
-    name: String,
+    family: Option<String>,
+    name: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -326,6 +433,8 @@ struct PackageLayer {
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct TrivyFinding {
+    #[serde(default, rename = "VendorIDs")]
+    vendor_ids: Option<Vec<String>>,
     pkg_identifier: Option<PackageIdentifier>,
     #[serde(rename = "VulnerabilityID")]
     id: String,
@@ -341,6 +450,10 @@ struct TrivyFinding {
 
 impl Report {
     pub fn from_trivy(bytes: &[u8]) -> Result<Self> {
+        Self::parse_trivy(bytes).map(|(report, _)| report)
+    }
+
+    pub(crate) fn parse_trivy(bytes: &[u8]) -> Result<(Self, bool)> {
         let input: TrivyReport = serde_json::from_slice(bytes)
             .map_err(|_| anyhow::anyhow!("Upload a valid Trivy container image JSON report."))?;
         if input.schema_version != 2 || input.artifact_type != "container_image" {
@@ -356,11 +469,21 @@ impl Report {
             .map(|(i, id)| (id.as_str(), i as i32))
             .collect();
         let mut inventory_available = false;
+        let mut vulnerability_results = false;
+        let mut os_vulnerability_results = false;
         let mut packages = BTreeSet::new();
-        let mut findings = BTreeSet::new();
+        let mut findings = Vec::new();
         let mut checks = BTreeSet::new();
         for result in input.results.unwrap_or_default() {
             inventory_available |= result.packages.is_some();
+            let has_vulnerability_evidence = result.vulnerabilities.is_some()
+                || (matches!(result.class.as_str(), "os-pkgs" | "lang-pkgs")
+                    && result
+                        .packages
+                        .as_ref()
+                        .is_some_and(|packages| !packages.is_empty()));
+            vulnerability_results |= has_vulnerability_evidence;
+            os_vulnerability_results |= result.class == "os-pkgs" && has_vulnerability_evidence;
             let ecosystem = if result.ecosystem.is_empty() && result.class == "os-pkgs" {
                 result.class
             } else {
@@ -379,7 +502,9 @@ impl Report {
                 });
             }
             for finding in result.vulnerabilities.unwrap_or_default() {
-                findings.insert(Finding {
+                let mut normalized = Finding {
+                    aliases: Vec::new(),
+                    detected_by: Vec::new(),
                     purl: finding.pkg_identifier.and_then(|v| v.purl),
                     id: finding.id,
                     ecosystem: ecosystem.clone(),
@@ -391,7 +516,9 @@ impl Report {
                         _ => "UNKNOWN".to_owned(),
                     },
                     title: finding.title,
-                });
+                };
+                normalized.record_aliases(finding.vendor_ids.iter().flatten().map(String::as_str));
+                findings.push(normalized);
             }
             for (category, values) in [
                 ("configuration", result.misconfigurations),
@@ -447,19 +574,23 @@ impl Report {
             });
         let mut report = Self {
             packages: packages.into_iter().collect(),
-            findings: findings.into_iter().collect(),
+            findings: merge_findings(findings.into_iter()),
+            evidence_available: None,
+            scanners: vec!["trivy".into()],
             inventory_available,
             digest,
+            observation_complete: Some(vulnerability_results),
             counts: Counts::default(),
             checks: checks.into_iter().collect(),
             size_bytes: input.metadata.size,
-            os: input
-                .metadata
-                .os
-                .map(|os| format!("{} {}", os.family, os.name)),
+            os: input.metadata.os.and_then(|os| {
+                let (family, name) = (os.family?, os.name?);
+                (!family.trim().is_empty() && !name.trim().is_empty())
+                    .then(|| format!("{} {}", family.trim(), name.trim()))
+            }),
         };
         report.recount();
-        Ok(report)
+        Ok((report, os_vulnerability_results))
     }
 
     pub fn recount(&mut self) {
@@ -495,6 +626,7 @@ pub struct Change {
 pub struct Comparison {
     pub packages: Vec<Change>,
     pub findings: Vec<Change>,
+    pub observations: Vec<Observation>,
     pub inventory_available: bool,
 }
 
@@ -540,16 +672,70 @@ fn findings(report: &Report) -> Versions {
     let mut versions = Versions::new();
     for finding in &report.findings {
         let label = format!("{} · {}", finding.id, finding.package);
-        let mut state = format!("{} · {}", finding.severity, finding.installed);
-        if !finding.fixed.is_empty() {
-            state.push_str(&format!(" → {}", finding.fixed));
-        }
         versions
             .entry((finding.ecosystem.clone(), label))
             .or_default()
-            .insert(state);
+            .insert(finding_state(finding));
     }
     versions
+}
+
+fn finding_state(finding: &Finding) -> String {
+    let mut state = format!("{} · {}", finding.severity, finding.installed);
+    if !finding.fixed.is_empty() {
+        state.push_str(&format!(" → {}", finding.fixed));
+    }
+    state
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Observation {
+    advisory: String,
+    #[serde(flatten)]
+    change: Change,
+}
+
+fn observation_versions(report: &Report) -> BTreeMap<(&str, &str, &str), BTreeSet<String>> {
+    let mut versions: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
+    for finding in &report.findings {
+        versions
+            .entry((
+                finding.ecosystem.as_str(),
+                finding.id.as_str(),
+                finding.package.as_str(),
+            ))
+            .or_default()
+            .insert(finding_state(finding));
+    }
+    versions
+}
+
+fn observation_diff(baseline: &Report, target: &Report) -> Vec<Observation> {
+    let before = observation_versions(baseline);
+    let after = observation_versions(target);
+    let keys: BTreeSet<_> = before.keys().chain(after.keys()).collect();
+    keys.into_iter()
+        .map(|&(ecosystem, advisory, package)| {
+            let key = (ecosystem, advisory, package);
+            let previous = before.get(&key);
+            let current = after.get(&key);
+            Observation {
+                advisory: advisory.to_owned(),
+                change: Change {
+                    name: format!("{advisory} · {package}"),
+                    ecosystem: ecosystem.to_owned(),
+                    status: match (previous, current) {
+                        (None, _) => "Added",
+                        (_, None) => "Removed",
+                        _ => "Still detected",
+                    },
+                    before: previous.into_iter().flatten().cloned().collect(),
+                    after: current.into_iter().flatten().cloned().collect(),
+                },
+            }
+        })
+        .collect()
 }
 
 pub fn compare(baseline: &Report, target: &Report) -> Comparison {
@@ -562,6 +748,7 @@ pub fn compare(baseline: &Report, target: &Report) -> Comparison {
             Vec::new()
         },
         findings: diff(findings(baseline), findings(target)),
+        observations: observation_diff(baseline, target),
     }
 }
 
@@ -612,6 +799,40 @@ mod tests {
         assert_eq!(result.packages[0].before, vec!["2"]);
         assert_eq!(result.packages[0].after, vec!["3"]);
         assert_eq!(result.findings[0].status, "Removed");
+        assert_eq!(result.observations[0].change.status, "Removed");
+    }
+
+    #[test]
+    fn a_changed_package_version_can_still_report_the_same_advisory() {
+        let baseline = sample("2", true);
+        let mut target = sample("3", true);
+        target.findings[0].fixed.clear();
+        let result = compare(&baseline, &target);
+        assert_eq!(result.observations[0].advisory, "TEST-1");
+        assert_eq!(result.observations[0].change.status, "Still detected");
+        assert_ne!(
+            result.observations[0].change.before,
+            result.observations[0].change.after
+        );
+    }
+
+    #[test]
+    fn trivy_uses_uppercase_os_metadata_and_records_incomplete_observations() -> Result<()> {
+        let mut document = json!({
+            "SchemaVersion": 2, "ArtifactType": "container_image",
+            "Metadata": {"OS": {"Family":"alpine","Name":"3.23.8"}},
+            "Results": [{"Class":"config","Type":"dockerfile"}]
+        });
+        let report = Report::from_trivy(&serde_json::to_vec(&document)?)?;
+        assert_eq!(report.os.as_deref(), Some("alpine 3.23.8"));
+        assert_eq!(report.observation_complete, Some(false));
+
+        document["Results"] =
+            json!([{"Class":"os-pkgs","Packages":[{"Name":"musl","Version":"1.2.5"}]}]);
+        let report = Report::from_trivy(&serde_json::to_vec(&document)?)?;
+        assert_eq!(report.observation_complete, Some(true));
+        assert!(report.findings.is_empty());
+        Ok(())
     }
 
     #[test]

@@ -3,7 +3,7 @@
   import { api, message, post, type Registry } from '#lib/api.js';
 
   interface Catalog { nextCursor: string | null; images: string[]; refreshedAt: string | null; error: string | null; }
-  let { registry, select }: {registry: Registry; select: (reference: string) => void} = $props();
+  let { registry, select, enterReference }: {registry: Registry; select: (reference: string) => void; enterReference: () => void} = $props();
   let catalog = $state<Catalog>();
   let filter = $state('');
   let repository = $state('');
@@ -74,7 +74,9 @@
           {#if repository && !visible.includes(repository)}<option value={repository}>{repository}</option>{/if}
           {#each visible as image (image)}<option value={image}>{image}</option>{/each}
         </select>
-        {#if !visible.length}<small>No matching repositories.</small>{/if}
+        {#if !loading && !visible.length && !catalog.error && !catalogIssue}
+          <small>{filter.trim() ? 'No repositories match this filter.' : 'No repositories are listed for this connection.'}</small>
+        {/if}
       </label>
       <label class="field"><span>Tag</span>
         <select bind:value={tag} disabled={!tags.length} onchange={(event) => {
@@ -84,14 +86,18 @@
           <option value="">{loadingTags ? 'Loading tags…' : 'Choose a tag'}</option>
           {#each tags as value (value)}<option value={value}>{value}</option>{/each}
         </select>
+        {#if repository && !loadingTags && !tags.length && !tagsIssue}<small>No tags were listed for this repository.</small>{/if}
       </label>
     </div>
     {#if catalog.nextCursor}<button type="button" class="button secondary" disabled={loading} onclick={() => load(registry.id, false, catalog?.nextCursor ?? undefined)}>Load more repositories</button>{/if}
-  {:else}
-    <p class="field-help">No repositories available. Enter an image reference manually.</p>
+  {:else if !catalogIssue && !catalog?.error}
+    <p class="field-help">No repositories are listed for this connection.</p>
   {/if}
   {#if catalogIssue || catalog?.error || tagsIssue}
     <div class="notice warning" role="status">{catalogIssue || catalog?.error || tagsIssue}</div>
+  {/if}
+  {#if (!loading && (!visible.length || catalogIssue || catalog?.error)) || (repository && !loadingTags && !tags.length)}
+    <div class="inline-input"><button type="button" class="button secondary" onclick={enterReference}>Enter image tag or digest</button></div>
   {/if}
 </div>
 

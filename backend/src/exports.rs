@@ -1,6 +1,6 @@
 use crate::{
     ApiError, ApiResult, App,
-    domain::Report,
+    domain::{Package, Report, scanner_names},
     report_branding::{self, Branding},
     report_pdf,
     store::Scan,
@@ -23,12 +23,38 @@ pub async fn download(
     State(app): State<App>,
     Path((id, format)): Path<(String, String)>,
 ) -> ApiResult<Response> {
-    let detail = app
-        .0
-        .database
-        .scan(&id)
-        .await?
-        .ok_or_else(|| ApiError::missing("Scan not found."))?;
+    if format == "discrepancies" {
+        crate::key(&id)?;
+        if let Some(bytes) = crate::artifacts::discrepancies(&app, &id)
+            .await
+            .map_err(ApiError::bad)?
+        {
+            return Ok(attachment(
+                &id,
+                "application/json",
+                "discrepancies.json",
+                bytes,
+            ));
+        }
+        if app.0.database.replay(&id).await?.is_none() {
+            return Err(ApiError::missing("Scan not found."));
+        }
+        return Err(ApiError::bad(
+            "A comparison requires completed reports from at least two vulnerability scanners.",
+        ));
+    }
+    let detail = if matches!(
+        format.as_str(),
+        "sbom" | "cyclonedx" | "spdx" | "raw" | "cbom"
+    ) {
+        app.0
+            .database
+            .scan(&id)
+            .await?
+            .ok_or_else(|| ApiError::missing("Scan not found."))?
+    } else {
+        crate::read_scan_detail(&app, &id).await?
+    };
     let report = detail
         .report
         .ok_or_else(|| ApiError::bad("Wait for the scan to complete."))?;
@@ -39,7 +65,23 @@ pub async fn download(
             .into_iter()
             .map(|bytes| ("cbom.cdx.json".to_owned(), bytes))
             .collect(),
-        "zip" => crate::artifacts::bundle(&app, &id).await?,
+        "zip" => {
+            let mut files = crate::artifacts::bundle(&app, &id).await?;
+            if crate::discrepancies::SCANNERS
+                .iter()
+                .filter(|engine| {
+                    files
+                        .iter()
+                        .any(|(name, _)| name.strip_suffix(".json") == Some(**engine))
+                })
+                .count()
+                >= 2
+                && let Ok(Some(bytes)) = crate::artifacts::discrepancies(&app, &id).await
+            {
+                files.push(("discrepancies.json".into(), bytes));
+            }
+            files
+        }
         "raw" => crate::artifacts::trivy(&app, &id)
             .await?
             .into_iter()
@@ -68,8 +110,7 @@ pub async fn download(
         match (name.as_deref(), version) {
             (Some("trivy") | None, Some(version)) => format!("Trivy {version}"),
             (Some("trivy"), None) => "Trivy".into(),
-            (Some(name), Some(version)) => format!("{name} {version}"),
-            (Some(name), None) => name.to_owned(),
+            (Some(_), _) => scanner_names(&report.scanners),
             (None, None) => "Unavailable".into(),
         }
     } else {
@@ -80,7 +121,11 @@ pub async fn download(
     })
     .await
     .map_err(anyhow::Error::from)??;
-    Ok((
+    Ok(attachment(&id, mime, extension, body))
+}
+
+pub(crate) fn attachment(id: &str, mime: &str, extension: &str, body: Vec<u8>) -> Response {
+    (
         [
             (header::CONTENT_TYPE, mime.to_owned()),
             (
@@ -91,7 +136,7 @@ pub async fn download(
         ],
         body,
     )
-        .into_response())
+        .into_response()
 }
 
 fn format_report(
@@ -135,9 +180,14 @@ fn format_report(
         "sbom" | "cyclonedx" if report.inventory_available => (
             "application/vnd.cyclonedx+json",
             "cdx.json",
-            serde_json::to_vec_pretty(&sbom(scan, report)).map_err(anyhow::Error::from)?,
+            serde_json::to_vec_pretty(&cyclonedx(scan, report)).map_err(anyhow::Error::from)?,
         ),
-        "sbom" | "cyclonedx" => {
+        "spdx" if report.inventory_available => (
+            "application/spdx+json",
+            "spdx.json",
+            serde_json::to_vec_pretty(&spdx(scan, report)?).map_err(anyhow::Error::from)?,
+        ),
+        "sbom" | "cyclonedx" | "spdx" => {
             return Err(ApiError::bad(
                 "This scan has no package inventory for an SBOM.",
             ));
@@ -176,25 +226,21 @@ fn format_report(
     })
 }
 
-fn sha256<'a>(scan: &'a Scan, report: &'a Report) -> Option<&'a str> {
+fn sha256<'a>(reference: &'a str, report: &'a Report) -> Option<&'a str> {
     report
         .digest
         .as_deref()
         .and_then(|value| value.strip_prefix("sha256:"))
-        .or_else(|| {
-            scan.reference
-                .rsplit_once("@sha256:")
-                .map(|(_, digest)| digest)
-        })
+        .or_else(|| reference.rsplit_once("@sha256:").map(|(_, digest)| digest))
         .filter(|digest| digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
-fn image_purl(scan: &Scan, digest: Option<&str>) -> Option<String> {
+fn image_purl(reference: &str, platform: &str, digest: Option<&str>) -> Option<String> {
     let digest = digest?;
-    let repository = crate::operations::repository(&scan.reference);
+    let repository = crate::operations::repository(reference);
     let (_, name) = repository.rsplit_once('/')?;
     let location: String = url::form_urlencoded::byte_serialize(repository.as_bytes()).collect();
-    let arch = scan.platform.strip_prefix("linux/")?.replace('/', "");
+    let arch = platform.strip_prefix("linux/")?.replace('/', "");
     Some(format!(
         "pkg:oci/{}@sha256%3A{}?arch={arch}&repository_url={location}",
         name.to_ascii_lowercase(),
@@ -202,14 +248,44 @@ fn image_purl(scan: &Scan, digest: Option<&str>) -> Option<String> {
     ))
 }
 
-fn sbom(scan: &Scan, report: &Report) -> Value {
-    let digest = sha256(scan, report);
-    let purl = image_purl(scan, digest);
+pub const SCHEDULED_SBOM: &str = "scheduled-sbom";
+
+fn inventory_packages(report: &Report) -> impl Iterator<Item = &Package> {
+    let mut seen = BTreeSet::new();
+    report.packages.iter().filter(move |package| {
+        seen.insert((
+            &package.ecosystem,
+            &package.name,
+            &package.version,
+            package.purl.as_deref().filter(|purl| !purl.is_empty()),
+        ))
+    })
+}
+
+fn cyclonedx(scan: &Scan, report: &Report) -> Value {
+    cyclonedx_inventory(
+        &scan.id,
+        &scan.reference,
+        &scan.platform,
+        scan.finished_at.as_deref().unwrap_or(&scan.created_at),
+        report,
+    )
+}
+
+pub fn cyclonedx_inventory(
+    id: &str,
+    reference: &str,
+    platform: &str,
+    timestamp: &str,
+    report: &Report,
+) -> Value {
+    let digest = sha256(reference, report);
+    let purl = image_purl(reference, platform, digest);
     let mut component = json!({
-        "type":"container","name":crate::operations::repository(&scan.reference),
-        "bom-ref":purl.clone().unwrap_or_else(|| format!("urn:uuid:{}", scan.id)),
-        "properties":[{"name":"certhia:reference","value":scan.reference},
-                      {"name":"certhia:platform","value":scan.platform}]
+        "type":"container","name":crate::operations::repository(reference),
+        "bom-ref":purl.clone().unwrap_or_else(|| format!("urn:uuid:{id}")),
+        "properties":[{"name":"certhia:reference","value":reference},
+                      {"name":"certhia:platform","value":platform}]
     });
     if let Some(digest) = digest {
         component["version"] = json!(format!("sha256:{digest}"));
@@ -221,13 +297,95 @@ fn sbom(scan: &Scan, report: &Report) -> Value {
     json!({
         "$schema":"http://cyclonedx.org/schema/bom-1.6.schema.json",
         "bomFormat":"CycloneDX","specVersion":"1.6","version":1,
-        "serialNumber":format!("urn:uuid:{}",scan.id),
-        "metadata":{"timestamp":scan.finished_at.as_ref().unwrap_or(&scan.created_at),"component":component},
-        "components":report.packages.iter().map(|p| json!({
-            "type":"library","name":p.name,"version":p.version,
-            "properties":[{"name":"certhia:ecosystem","value":p.ecosystem}]
-        })).collect::<Vec<_>>()
+        "serialNumber":format!("urn:uuid:{id}"),
+        "metadata":{"timestamp":timestamp,"component":component,
+            "tools":{"components":report.scanners.iter().map(|id| json!({"type":"application","name":scanner_names(std::slice::from_ref(id))})).collect::<Vec<_>>() }},
+        "components":inventory_packages(report).map(|p| {
+            let mut component = json!({
+                "type":"library","name":p.name,"version":p.version,
+                "properties":[{"name":"certhia:ecosystem","value":p.ecosystem}]
+            });
+            if let Some(purl) = p.purl.as_deref().filter(|purl| !purl.is_empty()) {
+                component["purl"] = json!(purl);
+            }
+            component
+        }).collect::<Vec<_>>()
     })
+}
+
+fn spdx(scan: &Scan, report: &Report) -> Result<Value> {
+    let created = chrono::DateTime::parse_from_rfc3339(
+        scan.finished_at.as_deref().unwrap_or(&scan.created_at),
+    )?
+    .with_timezone(&chrono::Utc)
+    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let digest = sha256(&scan.reference, report);
+    let purl = image_purl(&scan.reference, &scan.platform, digest);
+    let version = digest.map(|value| format!("sha256:{value}"));
+    let mut container = spdx_package(
+        "SPDXRef-Image",
+        &scan.reference,
+        version.as_deref(),
+        purl.as_deref(),
+    );
+    container["primaryPackagePurpose"] = json!("CONTAINER");
+
+    let mut packages = vec![container];
+    let mut relationships = vec![json!({
+        "spdxElementId": "SPDXRef-DOCUMENT",
+        "relationshipType": "DESCRIBES",
+        "relatedSpdxElement": "SPDXRef-Image",
+    })];
+    for (index, package) in inventory_packages(report).enumerate() {
+        let id = format!("SPDXRef-Package-{}", index + 1);
+        packages.push(spdx_package(
+            &id,
+            &package.name,
+            Some(&package.version),
+            package.purl.as_deref(),
+        ));
+        relationships.push(json!({
+            "spdxElementId": "SPDXRef-Image",
+            "relationshipType": "CONTAINS",
+            "relatedSpdxElement": id,
+        }));
+    }
+    Ok(json!({
+        "spdxVersion": "SPDX-2.3",
+        "dataLicense": "CC0-1.0",
+        "SPDXID": "SPDXRef-DOCUMENT",
+        "name": scan.reference,
+        "documentNamespace": format!("urn:uuid:{}", uuid::Uuid::new_v4()),
+        "creationInfo": {
+            "created": created,
+            "creators": [format!("Tool: {}-{}", crate::PRODUCT_NAME, env!("CARGO_PKG_VERSION"))],
+        },
+        "packages": packages,
+        "relationships": relationships,
+    }))
+}
+
+fn spdx_package(id: &str, name: &str, version: Option<&str>, purl: Option<&str>) -> Value {
+    let mut package = json!({
+        "SPDXID": id,
+        "name": name,
+        "downloadLocation": "NOASSERTION",
+        "filesAnalyzed": false,
+        "licenseConcluded": "NOASSERTION",
+        "licenseDeclared": "NOASSERTION",
+        "copyrightText": "NOASSERTION",
+    });
+    if let Some(version) = version.filter(|v| !v.is_empty()) {
+        package["versionInfo"] = json!(version);
+    }
+    if let Some(purl) = purl.filter(|purl| !purl.is_empty()) {
+        package["externalRefs"] = json!([{
+            "referenceCategory": "PACKAGE-MANAGER",
+            "referenceType": "purl",
+            "referenceLocator": purl,
+        }]);
+    }
+    package
 }
 
 struct Review {
@@ -254,8 +412,8 @@ async fn review_notes(app: &App, id: &str) -> Result<BTreeMap<String, Review>> {
 }
 
 fn vex(scan: &Scan, report: &Report, reviews: &BTreeMap<String, Review>) -> Value {
-    let digest = sha256(scan, report);
-    let purl = image_purl(scan, digest);
+    let digest = sha256(&scan.reference, report);
+    let purl = image_purl(&scan.reference, &scan.platform, digest);
     let mut product = json!({"@id":purl.clone().unwrap_or_else(|| format!("urn:uuid:{}",scan.id))});
     if let Some(purl) = purl {
         product["identifiers"] = json!({"purl":purl});
@@ -263,18 +421,23 @@ fn vex(scan: &Scan, report: &Report, reviews: &BTreeMap<String, Review>) -> Valu
     if let Some(digest) = digest {
         product["hashes"] = json!({"sha-256":digest});
     }
-    let advisories: BTreeSet<_> = report
-        .findings
-        .iter()
-        .map(|finding| finding.id.as_str())
-        .collect();
+    let mut advisories = BTreeMap::<&str, BTreeSet<&str>>::new();
+    for finding in &report.findings {
+        advisories
+            .entry(&finding.id)
+            .or_default()
+            .extend(finding.aliases.iter().map(String::as_str));
+    }
     let statements = advisories
         .into_iter()
-        .map(|id| {
+        .map(|(id, aliases)| {
             let mut statement = json!({
                 "vulnerability":{"name":id},"products":[product],"status":"under_investigation",
                 "timestamp":scan.finished_at.as_ref().unwrap_or(&scan.created_at)
             });
+            if !aliases.is_empty() {
+                statement["vulnerability"]["aliases"] = json!(aliases);
+            }
             if let Some(review) = reviews.get(id) {
                 match review.status.as_str() {
                     "false_positive" if !review.note.trim().is_empty() => {
@@ -318,6 +481,7 @@ fn rows(scan: &Scan, report: &Report, branding: &Branding) -> Vec<String> {
         String::new(),
         format!("- Image: {}", escape(&scan.reference)),
         format!("- Platform: {}", escape(&scan.platform)),
+        format!("- Scanners: {}", escape(&scanner_names(&report.scanners))),
         format!("- Created: {}", scan.created_at),
         format!(
             "- Critical: {} | High: {} | Medium: {} | Low: {} | Unknown: {}",
@@ -332,12 +496,18 @@ fn rows(scan: &Scan, report: &Report, branding: &Branding) -> Vec<String> {
     ];
     for item in &report.findings {
         lines.push(format!(
-            "- {} | {} | {} {} | Fix: {}",
+            "- {} | {} | {} {} | Fix: {} | Detected by: {}{}",
             escape(&item.id),
             escape(&item.severity),
             escape(&item.package),
             escape(&item.installed),
-            escape(&item.fixed)
+            escape(&item.fixed),
+            escape(&scanner_names(&item.detected_by)),
+            if item.aliases.is_empty() {
+                String::new()
+            } else {
+                format!(" | Aliases: {}", escape(&item.aliases.join(", ")))
+            }
         ));
     }
     lines.push(String::new());
@@ -377,6 +547,7 @@ fn xlsx(scan: &Scan, report: &Report, branding: &Branding) -> Result<Vec<u8>> {
         ("Image", scan.reference.as_str()),
         ("Platform", scan.platform.as_str()),
         ("Scan date", scan.created_at.as_str()),
+        ("Scanners", &scanner_names(&report.scanners)),
     ]
     .into_iter()
     .enumerate()
@@ -389,7 +560,7 @@ fn xlsx(scan: &Scan, report: &Report, branding: &Branding) -> Result<Vec<u8>> {
     findings
         .set_name("Vulnerabilities")?
         .set_freeze_panes(1, 0)?
-        .set_column_range_width(0, 6, 25)?;
+        .set_column_range_width(0, 8, 25)?;
     findings.write_row_with_format(
         0,
         0,
@@ -401,6 +572,8 @@ fn xlsx(scan: &Scan, report: &Report, branding: &Branding) -> Result<Vec<u8>> {
             "Installed",
             "Fixed",
             "Title",
+            "Aliases",
+            "Detected by",
         ],
         &strong,
     )?;
@@ -416,6 +589,8 @@ fn xlsx(scan: &Scan, report: &Report, branding: &Branding) -> Result<Vec<u8>> {
                 &v.installed,
                 &v.fixed,
                 &v.title,
+                &v.aliases.join(", "),
+                &scanner_names(&v.detected_by),
             ],
         )?;
     }
@@ -482,7 +657,9 @@ fn archive(
     }
     if report.inventory_available {
         zip.start_file("sbom.cdx.json", options)?;
-        zip.write_all(&serde_json::to_vec_pretty(&sbom(scan, report))?)?;
+        zip.write_all(&serde_json::to_vec_pretty(&cyclonedx(scan, report))?)?;
+        zip.start_file("sbom.spdx.json", options)?;
+        zip.write_all(&serde_json::to_vec_pretty(&spdx(scan, report)?)?)?;
     }
     if !report.findings.is_empty() {
         zip.start_file("openvex.json", options)?;
@@ -497,4 +674,95 @@ fn archive(
         zip.write_all(&bytes)?;
     }
     Ok(zip.finish()?.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inventory() -> (Scan, Report) {
+        let scan = Scan {
+            id: "cb9dc8bf-98df-4a65-9945-94db20a0096e".into(),
+            reference: "registry.example.test/team/image:latest".into(),
+            platform: "linux/amd64".into(),
+            status: "completed".into(),
+            created_at: "2026-01-01T02:00:00+02:00".into(),
+            finished_at: None,
+            source: "registry".into(),
+            error: None,
+            counts: None,
+        };
+        let report = Report {
+            digest: Some(format!("sha256:{}", "a".repeat(64))),
+            scanners: vec!["trivy".into()],
+            inventory_available: true,
+            packages: vec![
+                crate::domain::Package {
+                    name: "libc".into(),
+                    version: "1".into(),
+                    ecosystem: "apk".into(),
+                    purl: Some("pkg:apk/alpine/libc@1?arch=x86_64".into()),
+                    layer_index: None,
+                },
+                crate::domain::Package {
+                    name: "other".into(),
+                    version: "2".into(),
+                    ecosystem: "apk".into(),
+                    purl: None,
+                    layer_index: None,
+                },
+            ],
+            ..Report::default()
+        };
+        (scan, report)
+    }
+
+    #[test]
+    fn cyclonedx_preserves_component_purls_when_known() {
+        let (scan, mut report) = inventory();
+        let mut repeated = report.packages[0].clone();
+        repeated.layer_index = Some(1);
+        report.packages.push(repeated);
+        let bom = cyclonedx(&scan, &report);
+        assert_eq!(bom["components"].as_array().unwrap().len(), 2);
+        assert_eq!(bom["components"][0]["purl"], json!(report.packages[0].purl));
+        assert!(bom["components"][1].get("purl").is_none());
+        assert_eq!(bom["metadata"]["component"]["type"], "container");
+    }
+
+    #[test]
+    fn spdx_export_describes_image_and_contains_packages() {
+        let (scan, mut report) = inventory();
+        let export = |report: &Report| {
+            format_report(
+                &scan,
+                report,
+                "spdx",
+                vec![],
+                &BTreeMap::new(),
+                &Branding::default(),
+                "",
+            )
+        };
+        let (mime, extension, body) = export(&report).ok().unwrap();
+        let doc: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(mime, "application/spdx+json");
+        assert_eq!(extension, "spdx.json");
+        assert_eq!(doc["spdxVersion"], "SPDX-2.3");
+        assert_eq!(doc["creationInfo"]["created"], "2026-01-01T00:00:00Z");
+        assert_eq!(doc["relationships"][0]["relationshipType"], "DESCRIBES");
+        assert_eq!(doc["relationships"][1]["relationshipType"], "CONTAINS");
+        assert_eq!(
+            doc["relationships"][1]["relatedSpdxElement"],
+            doc["packages"][1]["SPDXID"]
+        );
+        assert_eq!(
+            doc["packages"][1]["externalRefs"][0]["referenceLocator"],
+            json!(report.packages[0].purl)
+        );
+        assert!(doc["packages"][2].get("externalRefs").is_none());
+
+        report.inventory_available = false;
+        assert!(export(&report).is_err());
+    }
 }

@@ -6,7 +6,19 @@ export const issueTrackers = [
   ['redmine', 'Redmine'], ['other', 'Other']
 ] as const;
 
+export type IssueScope = 'image' | 'advisory';
+export type ExceptionScope = 'reference' | 'repository';
+
+export interface FindingException {
+  scope: ExceptionScope;
+  reason: string;
+  expiresAt: string;
+}
+
+export const trackingFilters = [...classifications, ['excepted', 'Excepted']] as const;
+
 export interface TrackerIssue {
+  scope?: IssueScope;
   trackerId?: string;
   tracker: string;
   url: string;
@@ -27,6 +39,7 @@ export interface FindingTracking {
   status: string;
   note: string;
   issue?: TrackerIssue | null;
+  exception?: FindingException;
 }
 
 export interface TrackingTarget {
@@ -43,9 +56,20 @@ export function classificationsPath(scanId: string, finding?: string) {
 }
 
 export function trackingStatus(status = 'open'): string {
-  return classifications.find(([value]) => value === status)?.[1] ?? 'Open';
+  return trackingFilters.find(([value]) => value === status)?.[1] ?? 'Open';
+}
+
+export function effectiveTrackingStatus(tracking?: FindingTracking): string {
+  const status = tracking?.status ?? 'open';
+  return status === 'open' && tracking?.exception ? 'excepted' : status;
 }
 
 export function trackerName(tracker: string): string {
   return issueTrackers.find(([value]) => value === tracker)?.[1] ?? 'Issue';
+}
+
+export function findingReportPath(scanId: string, finding: string, track = false) {
+  const params = new URLSearchParams({ finding });
+  if (track) params.set('track', '1');
+  return '/scans/' + encodeURIComponent(scanId) + '?' + params;
 }

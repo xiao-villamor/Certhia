@@ -2,6 +2,8 @@
   import { goto } from '$app/navigation';
   import ConfigDialog from '#lib/ConfigDialog.svelte';
   import { onMount, onDestroy } from 'svelte';
+  import { uniqueSwarmImages, type SwarmImage } from '#lib/swarm-discovery.js';
+  import { trivyImportDetails } from '#lib/trivy-import.js';
   import RegistryCatalogPicker from '#lib/RegistryCatalogPicker.svelte';
   import { api, message, platforms, post, scannerProviders, type Registry, type ScannerAvailability, allRegistries } from '#lib/api.js';
 
@@ -16,22 +18,61 @@
   const showRegistry = $derived(mode === 'registry' || (discovery && mode !== 'docker'));
   const sources = [
     { id: 'registry', label: 'Registry image', hint: 'Scan a public or private image by tag or digest.' },
-    { id: 'docker', label: 'Local Docker', hint: 'Choose images available on the connected Docker daemon.' },
-    { id: 'swarm', label: 'Docker Swarm', hint: 'Find images running as Swarm services.' },
-    { id: 'kubernetes', label: 'Kubernetes', hint: 'Find images from pods in the connected cluster.' },
+    { id: 'docker', label: 'Local Docker', hint: 'Choose an image from the connected Docker daemon.', find: 'Find local images' },
+    { id: 'swarm', label: 'Docker Swarm', hint: 'Choose an image from a service on the connected Swarm manager.', find: 'Find service images' },
+    { id: 'kubernetes', label: 'Kubernetes', hint: 'Choose an image declared by a pod in the connected cluster.', find: 'Find pod images' },
     { id: 'archive', label: 'Image archive', hint: 'Upload a Docker image archive for scanning.' },
     { id: 'import', label: 'Trivy JSON', hint: 'Add an existing Trivy report to your scan history.' }
   ];
   const source = $derived(sources.find(item => item.id === mode) ?? sources[0]);
   let registries = $state<Registry[]>([]);
   let reference = $state('');
-  let discovered = $state<{reference: string; label: string;}[]>([]);
-  let discovering = $state(false);
+  let referenceInput = $state<HTMLInputElement>();
+  type ImageUsage = {
+    namespace: string;
+    pod: string;
+    workloadKind: string;
+    workloadName: string;
+    container: string;
+    containerType: 'app' | 'init' | 'ephemeral';
+  };
+  type DiscoveredImage = SwarmImage & {
+    label: string;
+    running?: boolean | null;
+    usages?: ImageUsage[];
+  };
+  let discovered = $state<DiscoveredImage[]>([]);
+  const selectedImage = $derived(discovered.find(item => item.reference === reference));
+  let lookup = $state<'idle' | 'loading' | 'ready' | 'failed'>('idle');
+  let lookupError = $state('');
+  let pickedImage = '';
   let namespace = $state('');
   let namespaces = $state<string[]>([]);
+  let namespaceListUnavailable = $state(false);
   let query = $state('');
   let scanAll = $state(false);
+  let queuedSwarmDigests = $state<string[]>([]);
+  const swarmTargets = $derived.by(() => uniqueSwarmImages(discovered, registry?.host));
+  const remainingSwarmTargets = $derived.by(() => {
+    const queued = new Set(queuedSwarmDigests);
+    return [...swarmTargets].filter(([digest]) => !queued.has(digest));
+  });
+  const bulkSelected = $derived(scanAll && (mode === 'docker' || mode === 'swarm'));
   let discoveryRequest: AbortController | undefined;
+
+  function resetLookup() {
+    discoveryRequest?.abort();
+    discovered = [];
+    lookup = 'idle';
+    lookupError = '';
+    scanAll = false;
+    queuedSwarmDigests = [];
+  }
+
+  function clearPickedImage() {
+    if (pickedImage && reference === pickedImage) reference = '';
+    pickedImage = '';
+  }
 
   $effect(() => {
     initialMode;
@@ -42,34 +83,44 @@
 
   $effect(() => {
     mode;
-    discovered = [];
-    discoveryRequest?.abort();
-    discovering = false;
-    scanAll = false;
+    resetLookup();
+    pickedImage = '';
     file = undefined;
+    readingReport = false;
+    importReference = '';
+    importPlatform = '';
     error = '';
   });
 
   $effect(() => {
     if (mode !== 'kubernetes') return;
     const controller = new AbortController();
+    namespaces = [];
+    namespaceListUnavailable = false;
     void api<string[]>('/discover/kubernetes/namespaces', {signal:controller.signal})
-      .then(result => {namespaces = result;}).catch(() => {});
+      .then(result => { if (!controller.signal.aborted) namespaces = result; })
+      .catch(() => { if (!controller.signal.aborted) namespaceListUnavailable = true; });
     return () => controller.abort();
   });
 
   async function discover() {
+    if (mode === 'kubernetes') clearPickedImage();
+    resetLookup();
     const controller = new AbortController();
-    discoveryRequest?.abort();
     discoveryRequest = controller;
-    discovering = true;
+    lookup = 'loading';
     error = '';
     try {
-      discovered = await api('/discover/' + (mode === 'registry' ? 'dockerhub?q=' + encodeURIComponent(query) : mode
-        + (mode === 'kubernetes' && namespace ? '?namespace=' + encodeURIComponent(namespace) : '')), {signal:controller.signal});
-      if (!discovered.length) error = 'No images were found.';
-    } catch (issue) { if (!controller.signal.aborted) error = message(issue); }
-    finally { if (!controller.signal.aborted) discovering = false; }
+      const results = await api<typeof discovered>('/discover/' + (mode === 'registry' ? 'dockerhub?q=' + encodeURIComponent(query) : mode
+        + (mode === 'kubernetes' && namespace.trim() ? '?namespace=' + encodeURIComponent(namespace.trim()) : '')), {signal:controller.signal});
+      if (controller.signal.aborted) return;
+      discovered = results;
+      lookup = 'ready';
+    } catch (issue) {
+      if (controller.signal.aborted) return;
+      lookupError = message(issue);
+      lookup = 'failed';
+    }
   }
   let platform = $state('linux/amd64');
   let registryId = $state('');
@@ -78,12 +129,37 @@
   let priority = $state(0);
   const enginesForImage = $derived(mode === 'docker' || archive ? engines.local : engines.registry);
   let file = $state<File>();
+  let readingReport = $state(false);
+  let importReference = $state('');
+  let importPlatform = $state('');
+
+  async function readReport(upload: File | undefined) {
+    file = upload;
+    error = '';
+    importReference = initialReference;
+    importPlatform = '';
+    if (!upload) { readingReport = false; return; }
+    readingReport = true;
+    try {
+      if (upload.size > 20 * 1024 * 1024) throw new Error('The report exceeds the 20 MB limit.');
+      const details = trivyImportDetails(JSON.parse(await upload.text()));
+      if (file !== upload) return;
+      importReference = details.reference || initialReference;
+      importPlatform = details.platform;
+    } catch {
+      if (file !== upload) return;
+      error = upload.size > 20 * 1024 * 1024 ? 'The report exceeds the 20 MB limit.' : 'Choose a valid Trivy JSON report.';
+    } finally {
+      if (file === upload) readingReport = false;
+    }
+  }
   let busy = $state(false);
   let error = $state('');
   let registryError = $state('');
   const registry = $derived(registries.find((entry) => entry.id === registryId));
 
   function changeSource(next: string) {
+    clearPickedImage();
     if (dismiss) selectedMode = next;
     else void goto(next === 'registry' ? '/scans/new' : '/scans/new?mode=' + next);
   }
@@ -97,7 +173,7 @@
 
   async function submit(event: SubmitEvent) {
     event.preventDefault();
-    if (busy) return;
+    if (busy || readingReport) return;
     busy = true;
     error = '';
     try {
@@ -111,12 +187,31 @@
       } else if (importing) {
         if (!file) throw new Error('Choose a Trivy JSON report.');
         if (file.size > 20 * 1024 * 1024) throw new Error('The report exceeds the 20 MB limit.');
-        const query = new URLSearchParams({ reference, platform });
+        const query = new URLSearchParams({ reference: importReference, platform: importPlatform });
         result = await api('/scans/import?' + query, { method: 'POST', headers: { 'content-type': 'application/json' }, body: file });
       } else if (mode === 'docker' && scanAll) {
         await api('/scans/bulk', post({ scans:
           discovered.map(item => ({ source: 'docker', reference: item.reference, platform, priority,
             scanners:scanners.filter(scanner => enginesForImage.includes(scanner)) })) }));
+        dismiss?.();
+        await goto('/scans/bulk');
+        return;
+      } else if (mode === 'swarm' && scanAll) {
+        const targets = remainingSwarmTargets.map(([digest, item]) => ({
+          digest,
+          scan: {
+            source: 'swarm', reference: item.reference, platform, priority,
+            registryId: item.registryHost === registry?.host ? registryId : null,
+            scanners: scanners.filter(scanner => enginesForImage.includes(scanner))
+          }
+        }));
+        if (!targets.length) throw new Error('There are no remaining Swarm image digests to scan.');
+        // Each request is atomic and the bulk endpoint accepts up to 50 scans.
+        for (let offset = 0; offset < targets.length; offset += 50) {
+          const batch = targets.slice(offset, offset + 50);
+          await api('/scans/bulk', post({ scans: batch.map(target => target.scan) }));
+          queuedSwarmDigests = [...queuedSwarmDigests, ...batch.map(target => target.digest)];
+        }
         dismiss?.();
         await goto('/scans/bulk');
         return;
@@ -127,12 +222,62 @@
       dismiss?.();
       await goto('/scans/' + result.id);
     } catch (issue) {
-      error = message(issue);
+      const queued = mode === 'swarm' && scanAll ? queuedSwarmDigests.length : 0;
+      error = queued
+        ? `${queued} Swarm image scans queued. ${remainingSwarmTargets.length ? 'Submit again to queue the remaining images. ' : ''}${message(issue)}`
+        : message(issue);
     } finally {
       busy = false;
     }
   }
 </script>
+
+{#snippet imageChoices()}
+  {#if lookup === 'failed'}
+    <p class="notice error" role="alert">{lookupError}</p>
+  {:else if lookup === 'ready' && !discovered.length}
+    <p class="field-help" role="status">{mode === 'kubernetes' && namespace.trim()
+      ? 'No pod images found in ' + namespace.trim() + '. Try another namespace or enter an image reference.'
+      : 'No images found. You can enter an image reference manually.'}</p>
+  {:else if discovered.length}
+    <label class="field"><span>{mode === 'kubernetes' ? 'Pod images' : mode === 'swarm' ? 'Service images' : 'Discovered images'} ({discovered.length})</span>
+      <select value={discovered.some(item => item.reference === reference) ? reference : ''}
+        onchange={(event) => { pickedImage = event.currentTarget.value; reference = pickedImage; }}>
+        <option value="">Choose an image</option>
+        {#each discovered as item}
+          <option value={item.reference}>{item.label}{item.running ? ' (running)' : ''} · {item.reference}</option>
+        {/each}
+      </select>
+    </label>
+    {#if mode === 'kubernetes' && selectedImage?.usages?.length}
+      <details class="form-disclosure">
+        <summary>Pods and workloads using this image</summary>
+        <ul>
+          {#each selectedImage.usages as usage}
+            <li>{usage.namespace}/{usage.pod} · {usage.container}{usage.containerType === 'app' ? '' : ` (${usage.containerType})`}
+              {#if usage.workloadKind !== 'Pod'} · {usage.workloadKind}/{usage.workloadName}{/if}
+            </li>
+          {/each}
+        </ul>
+      </details>
+    {/if}
+    {#if mode === 'docker'}
+      {#if discovered.every(item => item.running == null)}
+        <p class="field-help">Running container status is unavailable.</p>
+      {/if}
+      <label class="inline-check"><input type="checkbox" bind:checked={scanAll} disabled={busy} /> Scan all discovered Docker images</label>
+    {:else if mode === 'swarm'}
+      {#if swarmTargets.size}
+        <label class="inline-check"><input type="checkbox" bind:checked={scanAll} disabled={busy} />
+          Scan all Swarm service image digests ({remainingSwarmTargets.length})
+        </label>
+      {/if}
+      {#if discovered.some(item => !item.digest)}
+        <p class="field-help">Services with tag-only image references can be scanned individually.</p>
+      {/if}
+    {/if}
+  {/if}
+{/snippet}
 
 {#snippet fields()}
     <fieldset class="field source-field">
@@ -141,7 +286,7 @@
         {#each sources as option (option.id)}
           <label class="source-option">
             <input type="radio" name={uid + '-source'} value={option.id} checked={source.id === option.id}
-              onchange={() => changeSource(option.id)} />
+              disabled={busy} onchange={() => changeSource(option.id)} />
             <span>{option.label}</span>
           </label>
         {/each}
@@ -149,9 +294,47 @@
       <small>{source.hint}</small>
     </fieldset>
     {#if error}<div class="notice error" role="alert">{error}</div>{/if}
+    {#if importing}
+      <label class="field">
+        <span>Trivy JSON report</span>
+        <input type="file" required accept=".json,application/json" disabled={busy}
+          onchange={event => void readReport(event.currentTarget.files?.[0])} />
+      </label>
+      {#if readingReport}<p class="field-help" role="status">Reading report details…</p>{/if}
+      {#if file && !readingReport}<p class="field-help">Confirm the image reference and platform. Fill in any details the report did not provide.</p>{/if}
+      <label class="field">
+        <span>Image reference</span>
+        <input class="mono" required maxlength="1024" placeholder="alpine:3.23" bind:value={importReference} disabled={readingReport || busy} />
+      </label>
+      <label class="field">
+        <span id={uid + '-import-platform-label'}>Platform</span>
+        <select aria-labelledby={uid + '-import-platform-label'} required bind:value={importPlatform} disabled={readingReport || busy}>
+          <option value="">Choose a platform</option>
+          {#each platforms as value}<option>{value}</option>{/each}
+        </select>
+      </label>
+    {:else}
+    {#if discovery}
+      {#if mode === 'kubernetes'}
+        <label class="field"><span id={uid + '-namespace-label'}>Namespace</span>
+          <input list={uid + '-namespaces'} placeholder="All namespaces" aria-labelledby={uid + '-namespace-label'}
+            aria-describedby={namespaceListUnavailable ? uid + '-namespace-help' : undefined} value={namespace} oninput={(event) => {
+            clearPickedImage();
+            resetLookup();
+            namespace = event.currentTarget.value;
+          }} />
+          {#if namespaceListUnavailable}<small id={uid + '-namespace-help'}>Namespace suggestions are unavailable. You can type a namespace you have access to.</small>{/if}
+        </label>
+        <datalist id={uid + '-namespaces'}>{#each namespaces as name}<option value={name}></option>{/each}</datalist>
+      {/if}
+      <div class="inline-input">
+        <button type="button" class="button secondary" onclick={discover} disabled={busy || lookup === 'loading'}>{lookup === 'loading' ? 'Finding images…' : source.find}</button>
+      </div>
+      {@render imageChoices()}
+    {/if}
     <label class="field">
       <span>Image reference {#if registry}<small>{registry.host}</small>{/if}</span>
-      <input class="mono" required={!(mode === 'docker' && scanAll)} maxlength="1024" placeholder={registry ? 'team/image:version' : 'registry.example.com/team/image:version'} bind:value={reference} />
+      <input class="mono" required={!bulkSelected} disabled={bulkSelected} maxlength="1024" placeholder={registry ? 'team/image:version' : 'registry.example.com/team/image:version'} bind:this={referenceInput} bind:value={reference} />
     </label>
     <div class="form-grid" class:single-field={!showRegistry}>
       <label class="field">
@@ -160,7 +343,7 @@
       </label>
       {#if showRegistry}
         <label class="field"><span>Registry connection</span>
-          <select bind:value={registryId} onchange={() => {discoveryRequest?.abort(); discovering = false; discovered = [];}}>
+          <select bind:value={registryId} onchange={() => { if (mode === 'registry') resetLookup(); }}>
             <option value="">Public or anonymous registry</option>
             {#each registries as item (item.id)}<option value={item.id}>{item.name} · {item.host}</option>{/each}
           </select>
@@ -174,43 +357,27 @@
       {/if}
     {/if}
     {#if mode === 'registry' && registry}
-      {#key registry.id}<RegistryCatalogPicker {registry} select={(image) => {reference = image;}} />{/key}
+      {#key registry.id}
+        <RegistryCatalogPicker {registry} select={(image) => {reference = image;}} enterReference={() => referenceInput?.focus()} />
+      {/key}
     {:else if mode === 'registry'}
       <details class="form-disclosure">
         <summary>Search Docker Hub</summary>
         <div class="disclosure-body">
           <div class="inline-input">
             <input aria-label="Docker Hub search" placeholder="Find images on Docker Hub" bind:value={query} />
-            <button type="button" class="button secondary" onclick={discover} disabled={discovering || query.trim().length < 2}>Search Docker Hub</button>
+            <button type="button" class="button secondary" onclick={discover} disabled={lookup === 'loading' || query.trim().length < 2}>{lookup === 'loading' ? 'Searching…' : 'Search Docker Hub'}</button>
           </div>
+          {@render imageChoices()}
         </div>
       </details>
     {/if}
-    {#if discovery || mode === 'registry'}
-      {#if discovery}
-      <div class="inline-input">
-        {#if mode === 'kubernetes'}<input aria-label="Namespace" list={uid + '-namespaces'} placeholder="All namespaces" bind:value={namespace} />
-        <datalist id={uid + '-namespaces'}>{#each namespaces as name}<option value={name}></option>{/each}</datalist>{/if}
-        <button type="button" class="button secondary" onclick={discover} disabled={discovering}>{discovering ? 'Discovering…' : 'Discover images'}</button>
-      </div>
-      {/if}
-      {#if discovered.length}
-        <label class="field"><span>Discovered images</span>
-          <select aria-label="Discovered images" onchange={(event) => {reference = event.currentTarget.value;}}>
-            <option value="">Select image</option>
-            {#each discovered as item}<option value={item.reference}>{item.label} · {item.reference}</option>{/each}
-          </select>
-        </label>
-        {#if mode === 'docker'}<label class="inline-check"><input type="checkbox" bind:checked={scanAll} /> Scan all discovered Docker images</label>{/if}
-      {/if}
-    {/if}
-    {#if importing || archive}
+    {#if archive}
       <label class="field">
-        <span>{importing ? 'Trivy JSON report' : 'Docker image archive'}</span>
-        <input type="file" required accept={importing ? '.json,application/json' : '.tar,.tar.gz,.tgz'} onchange={(event) => { file = event.currentTarget.files?.[0]; }} />
+        <span>Docker image archive</span>
+        <input type="file" required accept=".tar,.tar.gz,.tgz" onchange={(event) => { file = event.currentTarget.files?.[0]; }} />
       </label>
     {/if}
-    {#if !importing}
       <details class="form-disclosure">
         <summary>Scan options</summary>
         <div class="disclosure-body">
@@ -233,7 +400,7 @@
   {:else}
     <a class="button secondary" href="/">Cancel</a>
   {/if}
-  <button type="submit" class="button primary" disabled={busy}>{busy ? 'Submitting…' : importing ? 'Import report' : 'Start scan'}</button>
+  <button type="submit" class="button primary" disabled={busy || readingReport || (mode === 'swarm' && scanAll && !remainingSwarmTargets.length)}>{busy ? 'Submitting…' : importing ? 'Import report' : bulkSelected ? 'Start scans' : 'Start scan'}</button>
 {/snippet}
 
 {#if dismiss}

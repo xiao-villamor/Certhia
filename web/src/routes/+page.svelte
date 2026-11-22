@@ -20,6 +20,9 @@
     active: number;
     failed: number;
     severity: Record<Severity, number>;
+    historicalSeverity: Record<Severity, number>;
+    openWithFix: number;
+    incompleteLatest: number;
   }
 
   const panels = [
@@ -102,7 +105,8 @@
   }
 
   function updatePreferences(next: DeskPreferences) {
-    const showTriage = next.panels.includes('triage') && !preferences.panels.includes('triage');
+    const historicalTotal = $derived(summary && levels.reduce((total, level) => total + summary!.historicalSeverity[level], 0));
+  const showTriage = next.panels.includes('triage') && !preferences.panels.includes('triage');
     preferences = next;
     if (showTriage) void refreshTriage();
     try {
@@ -250,6 +254,7 @@
   const loading = $derived(hasFilters ? filterLoading : !recent && !recentError);
   const activityError = $derived(hasFilters ? filterError : recentError);
   const findingTotal = $derived(levels.reduce((total, level) => total + (summary?.severity[level] ?? 0), 0));
+  const historicalTotal = $derived(summary && levels.reduce((total, level) => total + summary!.historicalSeverity[level], 0));
   const showTriage = $derived(preferences.panels.includes('triage'));
 
   function count(value: number | undefined) {
@@ -465,17 +470,20 @@
       <strong class:critical-text={!!summary?.failed}>{count(summary?.failed)}</strong>
       <small>Recorded scans</small>
     </button>
-    <a class="metric" href="/library?severity=critical&scope=history">
-      <span>Critical findings <ArrowRight size={14} aria-hidden="true" /></span>
+    <a class="metric" href="/library?status=open&severity=critical">
+      <span>Open critical findings <ArrowRight size={14} aria-hidden="true" /></span>
       <strong class:critical-text={!!summary?.severity.critical}>{count(summary?.severity.critical)}</strong>
-      <small>Across scanned digests</small>
+      <small>Latest completed scans</small>
     </a>
-    <a class="metric" href="/library?severity=high&scope=history">
-      <span>High findings <ArrowRight size={14} aria-hidden="true" /></span>
+    <a class="metric" href="/library?status=open&severity=high">
+      <span>Open high findings <ArrowRight size={14} aria-hidden="true" /></span>
       <strong class:high-text={!!summary?.severity.high}>{count(summary?.severity.high)}</strong>
-      <small>Across scanned digests</small>
+      <small>Latest completed scans</small>
     </a>
   </div>
+  {#if summary?.incompleteLatest}
+    <p class="panel-footer field-help">{count(summary.incompleteLatest)} latest reports have incomplete vulnerability observations.</p>
+  {/if}
 </section>
 
 {/snippet}
@@ -483,8 +491,11 @@
 {#snippet triagePanel()}
   <section class="panel triage-panel" aria-labelledby="triage-title">
     <div class="panel-title">
-      <div><h2 id="triage-title">Needs triage</h2><p>Up to four open critical or high findings from the latest scanned tags.</p></div>
-      <a class="button primary" href="/library?status=open">Open triage queue <ArrowRight aria-hidden="true" size={15} /></a>
+      <div><h2 id="triage-title">Needs triage</h2><p>Up to four open critical or high findings from the latest completed scan per image reference and platform.</p></div>
+      <div class="filters">
+        <a class="button secondary" href="/library?status=open&fixable=true">Open findings with a reported fix{summary ? ' · ' + count(summary.openWithFix) : ''}</a>
+        <a class="button primary" href="/library?status=open">Open triage queue <ArrowRight aria-hidden="true" size={15} /></a>
+      </div>
     </div>
     {#if triageError}
       <div class="compact-empty" role="alert">{triageError} <button class="text-button" onclick={refreshTriage}>Retry</button></div>
@@ -525,7 +536,7 @@
 {#snippet severityPanel()}
   <section class="panel" aria-labelledby="exposure-title">
     <div class="panel-title">
-      <div><h2 id="exposure-title">Findings by severity</h2><p>{summary ? `${count(findingTotal)} across scanned digests` : 'Across scanned digests'}</p></div>
+      <div><h2 id="exposure-title">Open findings by severity</h2><p>{summary ? count(findingTotal) + ' advisories across the latest completed scans' : 'Latest completed scan per image reference and platform'}</p></div>
     </div>
     {#if summary && findingTotal > 0}
       <div class="severity-composition" aria-hidden="true">
@@ -537,12 +548,17 @@
     <dl class="severity-breakdown">
       {#each levels as level (level)}
         <div>
-          <dt><a class="table-link" href={'/library?scope=history&severity=' + level}>
+          <dt><a class="table-link" href={'/library?status=open&severity=' + level}>
             <span class={'severity-marker ' + level} aria-hidden="true"></span>{level}</a></dt>
           <dd>{count(summary?.severity[level])}</dd>
         </div>
       {/each}
     </dl>
+    {#if summary}
+      <p class="panel-footer field-help">Historical total across scanned digests · {count(historicalTotal)} package–advisory records
+        <a class="table-link" href="/library?scope=history">Browse history</a>
+      </p>
+    {/if}
   </section>
 {/snippet}
 

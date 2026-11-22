@@ -75,7 +75,7 @@
   ];
 
   const path = $derived(page.url.pathname.replace(/\/$/, '') || '/');
-  const entry = $derived(path === '/login' || path === '/setup');
+  const entry = $derived(path === '/login' || path === '/setup' || path === '/welcome');
   const restricted = $derived((path === '/audit-logs' && !auth.admin)
     || (['/settings', '/registries', '/scans/new', '/scans/bulk'].includes(path) && !auth.operator));
   const section = $derived.by(() => {

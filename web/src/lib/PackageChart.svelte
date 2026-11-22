@@ -42,7 +42,7 @@
 
 <section class="panel" aria-labelledby="package-impact-title">
   <div class="panel-title">
-    <div><h2 id="package-impact-title">Most affected package versions</h2><p>Ranked by findings across image digests</p></div>
+    <div><h2 id="package-impact-title">Most affected package versions</h2><p>Historical ranking across scanned digests</p></div>
     <a class="button secondary" href="/library?scope=history">Vulnerabilities <ArrowRight size={15} aria-hidden="true" /></a>
   </div>
   {#if loading}

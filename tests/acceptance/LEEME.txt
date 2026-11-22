@@ -1,0 +1,20 @@
+Pruebas de aceptación de Certhia
+
+Desde la raíz del checkout, con Rust, Node, Python 3, Docker y acceso al daemon, ejecuta lo siguiente. Sustituye tests/acceptance por la ruta del paquete si lo descargaste aparte.
+
+  npm --prefix web ci
+  npm --prefix web run check
+  npm --prefix web run build
+  SQLX_OFFLINE=true cargo build --locked --manifest-path backend/Cargo.toml
+  SQLX_OFFLINE=true cargo test --locked --manifest-path backend/Cargo.toml
+  npm --prefix tests/acceptance ci
+  tests/acceptance/node_modules/.bin/playwright install chromium
+  python3 tests/acceptance/acceptance.py
+
+El script levanta PostgreSQL 17 en un contenedor temporal y Certhia en loopback con datos y credenciales generados. Kubernetes, el socket de Swarm y la API de Gitea devuelven respuestas controladas. El caso GAR comprueba perfil y envío a la cola. Las pruebas de navegador comprueban también estados vacíos y de error.
+
+Para las pruebas nativas instala Trivy, Grype y Syft en PATH, o indica sus ejecutables con CERTHIA_TEST_TRIVY, CERTHIA_TEST_GRYPE y CERTHIA_TEST_SYFT. La ausencia de un motor se imprime como SKIP. El archivo de imagen se construye localmente y contiene metadatos de paquete. Las bases de avisos pueden descargarse durante la prueba. Para utilizar una copia de pruebas ya descargada, define CERTHIA_TEST_DB_CACHE apuntando a un directorio con trivy/db y grype/6. Con esa opción las actualizaciones de las dos bases están desactivadas. CERTHIA_TEST_OUTPUT guarda el ZIP del informe multimotor.
+
+Para probar el binario release, usa CERTHIA_BINARY con su ruta absoluta. CERTHIA_TEST_BENCH_DIR guarda las muestras de lectura por API. CERTHIA_BENCH_BASELINE puede apuntar a otro binario compatible para medirlo en la misma base temporal y puerto. Ejecuta después digestdesk bench compare sobre api-before.json y api-after.json. La comparación offline y sus condiciones de identidad están documentadas en el README del proyecto.
+
+CERTHIA_TEST_SCAN_REPETITIONS permite repetir el escaneo nativo por configuración (Trivy, Grype y Trivy+Grype+Syft). Con CERTHIA_TEST_OUTPUT se guarda tiempos-escaneo.json con muestras desde el envío del archivo hasta la confirmación de fin, mediana y p95. El sondeo se realiza cada 250 ms. El archivo registra el SHA-256 de la misma imagen de prueba; compara siempre bases, versiones, concurrencia y condiciones de caché equivalentes.

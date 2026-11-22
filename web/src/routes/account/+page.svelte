@@ -40,11 +40,11 @@
       <input type="password" bind:value={currentPassword} autocomplete="current-password" required maxlength="1024" />
     </label>
     <label class="field"><span>New password</span>
-      <input type="password" bind:value={newPassword} autocomplete="new-password" required minlength="12" maxlength="1024" />
-      <small>Use at least 12 characters.</small>
+      <input type="password" bind:value={newPassword} autocomplete="new-password" required minlength="8" maxlength="1024" />
+      <small>Use at least 8 characters.</small>
     </label>
     <label class="field"><span>Confirm new password</span>
-      <input type="password" bind:value={confirmation} autocomplete="new-password" required minlength="12" maxlength="1024" />
+      <input type="password" bind:value={confirmation} autocomplete="new-password" required minlength="8" maxlength="1024" />
     </label>
     {#if issue}<div class="notice error" role="alert">{issue}</div>{/if}
     <div class="actions"><button class="button primary" disabled={busy}>{busy ? 'Saving…' : 'Change password'}</button></div>

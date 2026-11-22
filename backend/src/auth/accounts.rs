@@ -61,14 +61,14 @@ fn password_policy(password: &str) -> ApiResult<()> {
         "correcthorsebatterystaple",
     ];
     if password.len() > 1024
-        || password.chars().count() < 12
+        || password.chars().count() < 8
         || password.chars().all(char::is_whitespace)
         || COMMON
             .iter()
             .any(|common| password.eq_ignore_ascii_case(common))
     {
         return Err(ApiError::bad(
-            "Choose an uncommon password with at least 12 characters and at most 1024 bytes.",
+            "Choose an uncommon password with at least 8 characters and at most 1024 bytes.",
         ));
     }
     Ok(())
@@ -103,6 +103,25 @@ pub fn email(value: &str) -> ApiResult<String> {
         return Ok(value.to_ascii_lowercase());
     }
     Err(ApiError::bad("Enter a valid email address."))
+}
+
+/// A local sign-in name: a username or an email address, stored lowercase.
+pub fn login_name(value: &str) -> ApiResult<String> {
+    let value = value.trim();
+    if value.contains('@') {
+        return email(value);
+    }
+    let value = value.to_ascii_lowercase();
+    if (2..=64).contains(&value.len())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    {
+        return Ok(value);
+    }
+    Err(ApiError::bad(
+        "Use 2 to 64 letters, digits, dots, dashes or underscores, or an email address.",
+    ))
 }
 
 pub fn name(value: &str) -> ApiResult<&str> {
@@ -189,7 +208,7 @@ pub async fn insert_user(
     ).bind(Uuid::now_v7()).bind(email).bind(name).bind(role).bind(password).fetch_one(connection).await?)
 }
 
-pub async fn initialize(app: &App, generated_code: Option<String>, recover: bool) -> Result<()> {
+pub async fn initialize(app: &App, recover: bool) -> Result<()> {
     let pool = &app.0.database.primary;
     if !recover && has_users(&mut *pool.acquire().await?).await? {
         return Ok(());
@@ -203,16 +222,13 @@ pub async fn initialize(app: &App, generated_code: Option<String>, recover: bool
                 app.0.auth.local,
                 "Initialize the first administrator before disabling local login"
             );
-            if let Some(code) = generated_code {
-                eprintln!("Certhia first-run setup code: {code}");
-            }
             return Ok(());
         }
         _ => anyhow::bail!(
             "Set CERTHIA_ADMIN_EMAIL and CERTHIA_ADMIN_PASSWORD or CERTHIA_ADMIN_PASSWORD_FILE"
         ),
     };
-    let email = email(&email_value)?;
+    let email = login_name(&email_value)?;
     password_policy(&password)?;
     let encoded = password_hash(&password)?;
     let mut tx = pool.begin().await?;
@@ -262,17 +278,22 @@ pub async fn status(State(app): State<App>) -> ApiResult<Json<Value>> {
         .iter()
         .map(|provider| json!({ "id": provider.id, "name": provider.name }))
         .collect();
-    Ok(Json(
-        json!({ "local": app.0.auth.local, "setupRequired": app.0.auth.local && !has_users, "providers": providers }),
-    ))
+    Ok(Json(json!({
+        "local": app.0.auth.local,
+        "setupRequired": app.0.auth.local && !has_users,
+        "setupCodeRequired": app.0.auth.setup_hash.is_some(),
+        "providers": providers
+    })))
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Setup {
     email: String,
+    #[serde(default)]
     display_name: String,
     password: String,
+    #[serde(default)]
     setup_code: String,
 }
 
@@ -293,16 +314,21 @@ pub async fn setup(
         20,
     )
     .await?;
-    if !app
+    if app
         .0
         .auth
         .setup_hash
-        .is_some_and(|expected| expected.ct_eq(&hash(input.setup_code.as_bytes())).into())
+        .is_some_and(|expected| !bool::from(expected.ct_eq(&hash(input.setup_code.as_bytes()))))
     {
         return Err(forbidden());
     }
-    let email = email(&input.email)?;
-    let name = name(&input.display_name)?;
+    let email = login_name(&input.email)?;
+    let display_name = if input.display_name.trim().is_empty() {
+        email.clone()
+    } else {
+        input.display_name.clone()
+    };
+    let name = name(&display_name)?;
     let encoded = new_hash(&app, input.password).await?;
     let mut tx = pool.begin().await?;
     lock_users(&mut tx).await?;
@@ -566,7 +592,7 @@ pub async fn create(
     Extension(session): Extension<Session>,
     Json(input): Json<Create>,
 ) -> ApiResult<(StatusCode, Json<User>)> {
-    let email = email(&input.email)?;
+    let email = login_name(&input.email)?;
     let name = name(&input.display_name)?;
     let encoded = match input.password {
         Some(password) if app.0.auth.local => Some(new_hash(&app, password).await?),
@@ -706,6 +732,24 @@ mod tests {
         assert!(!verify("wrong", &encoded));
         assert!(password_policy(password).is_ok());
         assert!(password_policy("PASSWORD1234").is_err());
-        assert!(password_policy("too-short").is_err());
+        assert!(password_policy("short1").is_err());
+    }
+}
+
+#[cfg(test)]
+mod login_name_tests {
+    use super::login_name;
+
+    #[test]
+    fn accepts_usernames_and_emails() {
+        assert_eq!(login_name(" Acme ").unwrap(), "acme");
+        assert_eq!(login_name("ops.team_1-a").unwrap(), "ops.team_1-a");
+        assert_eq!(
+            login_name("Admin@Example.com").unwrap(),
+            "admin@example.com"
+        );
+        assert!(login_name("a").is_err());
+        assert!(login_name("two words").is_err());
+        assert!(login_name("bad@").is_err());
     }
 }

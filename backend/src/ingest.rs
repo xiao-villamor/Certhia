@@ -97,7 +97,7 @@ pub async fn write(
     data: &Path,
     reference: &ImageReference,
     platform: &str,
-    captured: Captured,
+    mut captured: Captured,
     lease: Option<Lease>,
 ) -> Result<Uuid> {
     use std::fmt::Write;
@@ -127,6 +127,28 @@ pub async fn write(
     };
     let id = lease.map_or_else(Uuid::now_v7, |lease| lease.scan);
     let queued = Utc::now();
+    if lease.is_some()
+        && captured.report.inventory_available
+        && sqlx::query_scalar::<_, bool>("SELECT retain_sbom FROM scan_jobs WHERE scan_id=$1")
+            .bind(id)
+            .fetch_optional(&db.primary)
+            .await?
+            .unwrap_or(false)
+    {
+        let bom = crate::exports::cyclonedx_inventory(
+            &id.to_string(),
+            &reference.value,
+            platform,
+            &queued.to_rfc3339(),
+            &captured.report,
+        );
+        let bytes = serde_json::to_vec(&bom)?;
+        if bytes.len() <= crate::scanner::MAX_REPORT_BYTES {
+            captured.artifacts.push((crate::exports::SCHEDULED_SBOM.into(), bytes));
+        } else {
+            tracing::warn!(scan_id = %id, "Scheduled SBOM exceeds the artifact size limit");
+        }
+    }
     let mut artifacts = Vec::with_capacity(captured.artifacts.len());
     for (kind, bytes) in &captured.artifacts {
         let mut hash = String::with_capacity(64);
@@ -183,11 +205,12 @@ pub async fn write(
                     VALUES($1,$2,$3,$4,'completed',now())",id,queued,reference.value,platform).execute(&mut *tx).await?;
                 scan
             };
+            let complete = !captured.partial && captured.report.observation_complete != Some(false);
             sqlx::query("UPDATE scans s SET digest_id=$2,repository_id=$3,scanner=$4,raw_report_ref=$5,counts=$6,
-                          inventory_available=$7,scanner_version=$8,scanner_db_version=$9 FROM scan_directory sd WHERE sd.id=$1 AND s.id=sd.id AND s.queued_at=sd.queued_at")
+                          inventory_available=$7,scanner_version=$8,scanner_db_version=$9,observation_complete=$10 FROM scan_directory sd WHERE sd.id=$1 AND s.id=sd.id AND s.queued_at=sd.queued_at")
                 .bind(id).bind(digest_id).bind(repo_id).bind(&captured.scanner).bind(&raw_ref)
                 .bind(serde_json::to_value(&captured.report.counts)?).bind(captured.report.inventory_available)
-                .bind(&captured.scanner_version).bind(&captured.scanner_db_version)
+                .bind(&captured.scanner_version).bind(&captured.scanner_db_version).bind(complete)
                 .execute(&mut *tx).await?;
             sqlx::query!("INSERT INTO scan_checks(scan_id,ordinal,category,external_id,target,severity,title,detail)
                 SELECT $1,(n-1)::integer,j->>'category',j->>'id',j->>'target',j->>'severity',j->>'title',j->>'detail'
@@ -197,12 +220,17 @@ pub async fn write(
             sqlx::query!("INSERT INTO artifact_refs(scan_id,kind,object_key,owned) SELECT $1,kind,ref,true
                 FROM unnest($2::text[],$3::text[]) AS refs(kind,ref)",id,&kinds,&refs).execute(&mut *tx).await?;
             stage(&mut tx,&captured).await?;
-            if captured.partial{
+            if !complete {
                 sqlx::query("SET LOCAL certhia.partial = 'on'").execute(&mut *tx).await?;
             }
             sqlx::query!(
                 "SELECT merge_observations($1,$2,$3,$4)", digest_id, repo_id, scan, captured.report.inventory_available
             ).execute(&mut *tx).await?;
+            sqlx::query("INSERT INTO scan_observed_findings(scan_no,package_id,advisory_id,fixed_in,severity_id,title)
+                SELECT $1,o.package_id,o.advisory_id,o.fixed_in,i.severity_id,i.title
+                FROM observed o JOIN advisories a ON a.id=o.advisory_id
+                JOIN incoming_advisories i ON i.external_id=a.external_id")
+                .bind(scan).execute(&mut *tx).await?;
             if captured.advisory_metadata.as_array().is_some_and(|rows|!rows.is_empty()){
                 sqlx::query!("UPDATE advisories a SET description=coalesce(m.description,a.description),refs=coalesce(m.refs,a.refs),
                     published_at=coalesce(m.published_at,a.published_at),modified_at=coalesce(m.modified_at,a.modified_at),
@@ -216,7 +244,7 @@ pub async fn write(
                     coalesce(m.cvss_score,a.cvss_score),coalesce(m.cvss_vector,a.cvss_vector),coalesce(m.epss,a.epss),coalesce(m.kev,a.kev))",
                     captured.advisory_metadata).execute(&mut *tx).await?;
             }
-            crate::watches::record(&mut tx,id,digest_id,&reference.value,platform).await?;
+            crate::watches::record(&mut tx,id,scan,&reference.value,platform).await?;
             if let Some(tag) = reference.value.strip_prefix(repo_name).and_then(|suffix| suffix.strip_prefix(':')) {
                 sqlx::query!(
                     "INSERT INTO image_tags(repository_id,tag,platform,digest_id,updated_at) VALUES($1,$2,$3,$4,$5)

@@ -264,7 +264,7 @@ pub fn document() -> Value {
             "/scans/{id}/report/{format}",
             "get",
             "Scans",
-            "Download a report as PDF, XLSX, Markdown, JSON, raw, CycloneDX SBOM, CycloneDX CBOM, OpenVEX, or ZIP",
+            "Download a report as PDF, XLSX, Markdown, JSON, raw, CycloneDX SBOM, SPDX 2.3 JSON, CycloneDX CBOM, OpenVEX, or ZIP",
         ),
         (
             "/scans/{id}/scanner-results",
@@ -282,7 +282,7 @@ pub fn document() -> Value {
             "/scans/{id}/scanner-results/{tool}",
             "get",
             "Scans",
-            "Download a scanner artifact",
+            "Download a scanner artifact or a retained scheduled SBOM (scheduled-sbom)",
         ),
         (
             "/scans/{id}/classifications",
@@ -315,7 +315,18 @@ pub fn document() -> Value {
             "Scans",
             "Upload an image archive and queue a scan",
         ),
-        ("/compare", "get", "Images", "Compare two completed reports"),
+        (
+            "/compare",
+            "get",
+            "Images",
+            "Compare vulnerability observations in two completed reports",
+        ),
+        (
+            "/scans/{id}/previous",
+            "get",
+            "Scans",
+            "Find the previous completed scan for the same image reference and platform",
+        ),
         (
             "/compare/plan",
             "post",
@@ -470,6 +481,12 @@ pub fn document() -> Value {
             "Queue a registry scan from CI",
         ),
         (
+            "/webhooks/registries/{id}/ci/{scan_id}",
+            "get",
+            "Webhooks",
+            "Read a CI scan result for this registry",
+        ),
+        (
             "/webhooks/registries/{id}/harbor",
             "post",
             "Webhooks",
@@ -479,7 +496,7 @@ pub fn document() -> Value {
             "/scheduled-scans",
             "post",
             "Scheduling",
-            "Create a schedule",
+            "Create a schedule for image references, tags, or Kubernetes digest changes",
         ),
         (
             "/scheduled-scans/{id}",
@@ -534,7 +551,13 @@ pub fn document() -> Value {
             "/patches/{id}/publish",
             "post",
             "Patches",
-            "Publish a patched image",
+            "Publish a patched image and record its manifest digest",
+        ),
+        (
+            "/patch-publications/{id}/scan",
+            "post",
+            "Patches",
+            "Queue a scan of the published manifest",
         ),
     ] {
         let mut parameters = path
@@ -552,7 +575,7 @@ pub fn document() -> Value {
             }
             "/images" => &["q", "status", "repository", "platform", "limit", "cursor"][..],
             "/scans/{id}/classifications" if method == "get" => &["finding", "limit", "cursor"][..],
-            "/compare" => &["baseline", "target"][..],
+            "/compare" => &["baseline", "target", "publication"][..],
             "/scans/import" => &["reference", "platform"][..],
             "/scans/archive" => &["reference", "platform", "scanners", "priority"][..],
             "/vulnerabilities" => &[
@@ -617,6 +640,17 @@ pub fn document() -> Value {
                         "finding":{"type":"string","maxLength":150},
                         "status":{"type":"string","enum":crate::operations::FINDING_STATUSES},
                         "note":{"type":"string","maxLength":4000},
+                        "exceptionEdit":{"description":"Set or revoke an exception for this advisory and platform. Omit to keep existing exceptions.",
+                            "oneOf":[
+                                {"type":"object","required":["action","scope","reason","expiresAt"],"properties":{
+                                    "action":{"const":"set"},"scope":{"enum":["reference","repository"]},
+                                    "reason":{"type":"string","minLength":1,"maxLength":4000},
+                                    "expiresAt":{"type":"string","format":"date-time"}
+                                }},
+                                {"type":"object","required":["action","scope"],"properties":{
+                                    "action":{"const":"revoke"},"scope":{"enum":["reference","repository"]}
+                                }}
+                            ]},
                         "issue":{"description":"Omit to keep the current issue link. Use null to remove it.",
                             "oneOf":[{"type":"null"},{"type":"object","required":["trackerId","key"],"properties":{
                                 "trackerId":{"type":"string","format":"uuid"},
@@ -696,6 +730,15 @@ pub fn document() -> Value {
                     "Use a Harbor HTTP webhook for Artifact pushed. Default and CloudEvents push payloads are accepted. Harbor's Auth Header can contain the raw token."
                 );
             }
+            "/webhooks/registries/{id}/ci/{scan_id}" => {
+                operation["security"] = json!([{"RegistryWebhookToken":[]}]);
+                operation["description"] = json!("Available for 24 hours after the latest CI submission. Counts require a complete vulnerability observation.");
+                operation["responses"] = json!({
+                    "200":{"description":"CI scan status and summary"},
+                    "401":{"description":"Missing or invalid registry webhook token"},
+                    "404":{"description":"Scan was not submitted to this CI endpoint or the result window expired"}
+                });
+            }
             _ => {}
         }
         if path.starts_with("/auth/") || path.starts_with("/users") {
@@ -707,7 +750,7 @@ pub fn document() -> Value {
                 "description":"Exact browser origin serving Certhia, including scheme and any non-default port."
             }));
         }
-        if path.starts_with("/webhooks/") {
+        if path.starts_with("/webhooks/") && method == "post" {
             operation["responses"] = json!({
                 "200":{"description":"Non-push Harbor event ignored"},
                 "202":{"description":"Request accepted, returning scanIds and the number of newly queued scans"},

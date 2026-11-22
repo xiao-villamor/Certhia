@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { auth } from '#lib/auth.svelte.js';
+  import { auth, returnPath } from '#lib/auth.svelte.js';
   import UserSettings from '#lib/UserSettings.svelte';
   import { productName } from '#lib/product.js';
   import { page } from '$app/state';
@@ -30,6 +30,7 @@
     { id: 'reports', label: 'Reports', href: '/settings?section=reports' },
     { id: 'users', label: 'Users', href: '/settings?section=users' }
   ] as const;
+  const trackerReturn = $derived(returnPath(new URL(page.url.href)));
   const requestedSection = $derived(page.url.searchParams.get('section') ?? page.url.hash.slice(1));
   const section = $derived(
     !auth.admin ? 'image-watches' : requestedSection === 'notifications-title' || requestedSection === 'retention-title'
@@ -299,6 +300,7 @@
       {/if}
     </div>
   {:else if section === 'issue-trackers'}
+    {#if trackerReturn.startsWith('/scans/')}<p><a class="table-link" href={trackerReturn}>Return to finding</a></p>{/if}
     <IssueTrackerSettings />
   {:else if section === 'retention-notifications'}
     <section class="panel" id="retention-notifications" aria-labelledby="retention-notifications-title">

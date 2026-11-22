@@ -3,11 +3,13 @@
   import { productName } from '#lib/product.js';
   import { page } from '$app/state';
   import { onMount } from 'svelte';
+  import { goto } from '$app/navigation';
   import { ArrowRight, Download, PackageCheck, Wrench } from '@lucide/svelte';
   import { api, apiPage, imageName, message, post, time, type Registry, type Scan, allRegistries } from '#lib/api.js';
 
   interface PackageUpdate {package:string; fixed:string; installed:string|null; advisories:string[];}
-  interface Patch {id:string; scanId:string; reference:string; status:string; createdAt:string; error:string|null; packages:PackageUpdate[];}
+  interface Publication { id:string; reference:string; pinnedReference:string|null; scanId:string|null; }
+  interface Patch {id:string; scanId:string; reference:string; status:string; createdAt:string; error:string|null; packages:PackageUpdate[];publication:Publication|null;}
   interface Analysis {image:string; packages:PackageUpdate[]; canBuild:boolean;}
   let scans = $state<Scan[]>([]);
   let registries = $state<Registry[]>([]);
@@ -23,6 +25,22 @@
   let issue = $state('');
   let feedback = $state('');
   let selected = $state<Patch>();
+  let justPublished = $state<Publication>();
+
+  function comparisonPath(ids: {baseline:string;target:string;publication:string}) {
+    return '/compare?' + new URLSearchParams(ids);
+  }
+
+  async function scanPublished(publication: Publication) {
+    if (busy) return;
+    busy = true; issue = '';
+    try {
+      const result = await api<{baseline:string;target:string;publication:string}>(
+        '/patch-publications/' + publication.id + '/scan', post({}));
+      await goto(comparisonPath(result));
+    } catch (error) { issue = message(error); }
+    finally { busy = false; }
+  }
   let advisories = $state<string[]>([]);
   let allAdvisories = $derived([...new Set(analysis?.packages.flatMap(item => item.advisories) || [])]);
   let reference = $state('');
@@ -66,11 +84,12 @@
   async function publish(event: SubmitEvent) {
     event.preventDefault();
     if (!selected || !confirm('Publish this patched image to ' + reference + '?')) return;
-    busy = true; issue = ''; feedback = '';
+    busy = true; issue = ''; feedback = ''; justPublished = undefined;
     try {
-      const result = await api<{reference:string}>('/patches/' + selected.id + '/publish', post({reference,registryId:registryId || null}));
-      feedback = 'Image published to ' + result.reference;
+      const result = await api<Publication>('/patches/' + selected.id + '/publish', post({reference,registryId:registryId || null}));
+      justPublished = result;
       selected = undefined;
+      await refresh();
     } catch (error) {issue = message(error);}
     finally {busy = false;}
   }
@@ -79,6 +98,17 @@
 <div class="page-heading"><div><h1>Patch builder</h1><p>Plan and build operating-system package updates from Trivy reports.</p></div></div>
 {#if issue}<div class="notice error" role="alert">{issue}</div>{/if}
 {#if feedback}<div class="notice success" role="status">{feedback}</div>{/if}
+{#if justPublished}
+  <div class="notice success">
+    <p role="status">Image published to <span class="mono break">{justPublished.reference}</span>.</p>
+    {#if justPublished.pinnedReference}
+      <p class="mono break">{justPublished.pinnedReference}</p>
+      <button class="button secondary" disabled={busy} onclick={() => justPublished && scanPublished(justPublished)}>Scan published image</button>
+    {:else}
+      <p>The publish operation did not record a manifest digest.</p>
+    {/if}
+  </div>
+{/if}
 <div class="patch-workbench">
 <section class="panel" aria-labelledby="patch-source-title">
   <div class="panel-title"><h2 id="patch-source-title">Source report</h2></div>
@@ -148,7 +178,17 @@
       <td><a class="table-link mono" href={'/scans/' + patch.scanId}>{patch.reference}</a></td><td>{patch.status}{#if patch.error}<small>{patch.error}</small>{/if}</td>
       <td>{patch.packages.length}</td><td>{time(patch.createdAt)}</td>
       <td>{#if patch.status === 'completed'}<div class="filters"><a class="button secondary" href={'/api/patches/' + patch.id + '/download'} data-sveltekit-reload><Download size={17} /> OCI archive</a>
-        {#if auth.operator}<button class="button secondary" onclick={() => {selected = patch;}}>Publish</button>{/if}</div>{:else}—{/if}</td>
+        {#if auth.operator}<button class="button secondary" disabled={busy} onclick={() => {selected = patch;}}>Publish</button>{/if}
+        {#if patch.publication}
+          {@const publication = patch.publication}
+          {#if publication.scanId}
+            <a class="button secondary" href={comparisonPath({baseline: patch.scanId, target: publication.scanId, publication: publication.id})}>Published image comparison</a>
+          {:else if auth.operator && publication.pinnedReference && justPublished?.id !== publication.id}
+            <button class="button secondary" disabled={busy} onclick={() => scanPublished(publication)}>Scan published image</button>
+          {/if}
+          <span class="mono break" title={publication.pinnedReference ?? undefined}>{publication.reference}</span>
+        {/if}
+      </div>{:else}—{/if}</td>
     </tr>{/each}</tbody></table></div>{/if}
   {#if next}<button class="button secondary" onclick={() => refresh(true)}>Load more patches</button>{/if}
 </section>

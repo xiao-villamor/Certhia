@@ -4,8 +4,10 @@ mod artifact_blob;
 mod artifacts;
 mod auth;
 mod automation;
+mod benchmarks;
 mod comparison;
 mod discovery;
+mod discrepancies;
 mod domain;
 mod exports;
 mod images;
@@ -221,6 +223,7 @@ struct ScanInput {
 struct CompareInput {
     baseline: String,
     target: String,
+    publication: Option<Uuid>,
 }
 
 fn credentials(username: String, password: String) -> ApiResult<Option<Credentials>> {
@@ -335,13 +338,31 @@ async fn scan_detail(
     State(app): State<App>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<store::ScanDetail>> {
-    let scan = app
+    Ok(Json(read_scan_detail(&app, &id).await?))
+}
+
+async fn read_scan_detail(app: &App, id: &str) -> ApiResult<store::ScanDetail> {
+    let mut scan = app
         .0
         .database
-        .scan(&id)
+        .scan(id)
         .await?
         .ok_or_else(|| ApiError::missing("Scan not found."))?;
-    Ok(Json(scan))
+    if let Some(report) = &mut scan.report
+        && report.os.is_none()
+        && report.observation_complete.is_none()
+        && let Ok(Some(raw)) = artifacts::trivy(&app, &id).await
+        && let Ok(saved) = domain::Report::from_trivy(&raw)
+    {
+        report.os = saved.os;
+    }
+    if let Some(report) = &mut scan.report
+        && let Err(error) = artifacts::enrich(app, id, &scan.scan.source, report).await
+    {
+        tracing::warn!(scan_id=id, %error, "Could not load finding evidence");
+        report.evidence_available = Some(false);
+    }
+    Ok(scan)
 }
 
 pub struct ImageTarget {
@@ -476,13 +497,70 @@ async fn compare_scans(
         .scan(&input.target)
         .await?
         .ok_or_else(|| ApiError::missing("Target scan not found."))?;
-    let delta = match (&baseline.report, &target.report) {
-        (Some(before), Some(after)) => compare(before, after),
-        _ => return Err(ApiError::bad("Both scans must have completed reports.")),
+    if baseline.report.is_none() || target.report.is_none() {
+        return Err(ApiError::bad("Both scans must have completed reports."));
+    }
+    if baseline.scan.platform != target.scan.platform {
+        return Err(ApiError::bad("Choose two reports for the same platform."));
+    }
+    let (publication, selected) = if let Some(publication) = input.publication {
+        let (pinned, packages): (String, serde_json::Value) = sqlx::query_as(
+            "SELECT pub.pinned_reference,p.packages FROM patch_publications pub JOIN patches p ON p.id=pub.patch_id
+             WHERE pub.id=$1 AND p.scan_id=$2 AND pub.scan_id=$3",
+        )
+        .bind(publication).bind(key(&input.baseline)?).bind(key(&input.target)?)
+        .fetch_optional(&app.0.database.primary).await?
+        .ok_or_else(|| ApiError::missing("Publication and scan pair not found."))?;
+        let digest = pinned.rsplit_once('@').map(|(_, digest)| digest);
+        if target.scan.reference != pinned
+            || digest.is_none()
+            || target
+                .report
+                .as_ref()
+                .and_then(|report| report.digest.as_deref())
+                != digest
+        {
+            return Err(ApiError::bad(
+                "The target report does not confirm the published manifest digest.",
+            ));
+        }
+        let selected: std::collections::BTreeSet<String> = packages
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|package| package["advisories"].as_array().into_iter().flatten())
+            .filter_map(|advisory| advisory.as_str().map(str::to_owned))
+            .collect();
+        (Some(pinned), selected)
+    } else {
+        (None, Default::default())
     };
-    Ok(Json(
-        json!({ "baseline": baseline.scan, "target": target.scan, "changes": delta }),
-    ))
+    let trivy_only = publication.is_some();
+    let (before, after) = tokio::try_join!(
+        comparison::report(&app, &baseline, trivy_only),
+        comparison::report(&app, &target, trivy_only)
+    )?;
+    if before.1 != after.1 {
+        return Err(ApiError::bad(
+            "Choose reports with the same vulnerability scanners.",
+        ));
+    }
+    let selected = selected
+        .into_iter()
+        .map(|id| {
+            let detected = after.0.findings.iter().any(|finding| finding.id == id);
+            json!({"id":id,"detected":detected})
+        })
+        .collect::<Vec<_>>();
+    let (before_issues, after_issues) = tokio::try_join!(
+        comparison::issues(&app, &input.baseline),
+        comparison::issues(&app, &input.target)
+    )?;
+    Ok(Json(json!({
+        "baseline":baseline.scan,"target":target.scan,"baselineDigest":before.0.digest,
+        "targetDigest":after.0.digest,"scanners":before.1,"changes":compare(&before.0,&after.0),
+        "publication":publication,"selected":selected,"baselineIssues":before_issues,"targetIssues":after_issues
+    })))
 }
 
 async fn run_scan(app: &App, job: &store::Job, activity: jobs::Activity<'_>) -> Result<Captured> {
@@ -520,11 +598,23 @@ async fn run_scan(app: &App, job: &store::Job, activity: jobs::Activity<'_>) -> 
             )
         }
     };
-    if selected == ["trivy"] {
-        scanner::scan(target, &job.platform, credentials, &app.0.cache, activity).await
+    let captured = if selected == ["trivy"] {
+        scanner::scan(target, &job.platform, credentials, &app.0.cache, activity).await?
     } else {
-        native_scanners::scan(app, job, target, credentials, &selected, activity).await
+        native_scanners::scan(app, job, target, credentials, &selected, activity).await?
+    };
+    if let Some((_, digest)) = job.reference.rsplit_once('@') {
+        let published_scan: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT FROM patch_publications WHERE scan_id=$1)")
+                .bind(Uuid::parse_str(&job.id)?)
+                .fetch_one(&app.0.database.primary)
+                .await?;
+        anyhow::ensure!(
+            !published_scan || captured.report.digest.as_deref() == Some(digest),
+            "The scan did not confirm the published manifest digest."
+        );
     }
+    Ok(captured)
 }
 
 async fn worker(app: App) {
@@ -710,10 +800,16 @@ fn api_routes() -> Router<App> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args: Vec<_> = env::args().skip(1).collect();
+    if args.first().is_some_and(|name| name == "explain") {
+        return discrepancies::cli(&args[1..]);
+    }
     let _ = rustls::crypto::ring::default_provider().install_default();
+    if args.first().is_some_and(|name| name == "bench") {
+        return benchmarks::cli(&args[1..]).await;
+    }
     telemetry::init()?;
     let data = PathBuf::from(env::var("CERTHIA_DATA_DIR").unwrap_or_else(|_| "data".into()));
-    let args: Vec<_> = env::args().skip(1).collect();
     if args.as_slice() == ["benchmark-ingest"] {
         return ingest::benchmark(&data).await;
     }
@@ -729,7 +825,7 @@ async fn main() -> Result<()> {
         .filter(|host| !host.is_empty())
         .map(str::to_owned)
         .collect();
-    let auth::Startup { config, setup_code } = auth::Config::load(&allowed_hosts)?;
+    let auth::Startup { config } = auth::Config::load(&allowed_hosts)?;
     std::fs::create_dir_all(&data)?;
     let cache = data.join("trivy");
     std::fs::create_dir_all(&cache)?;
@@ -751,7 +847,7 @@ async fn main() -> Result<()> {
         auth: config,
     }));
     let recover = args.as_slice() == ["reset-admin-password"];
-    auth::initialize(&app, setup_code, recover).await?;
+    auth::initialize(&app, recover).await?;
     if recover {
         return Ok(());
     }
@@ -786,6 +882,7 @@ async fn main() -> Result<()> {
         .route("/settings", index.clone())
         .route("/login", index.clone())
         .route("/setup", index.clone())
+        .route("/welcome", index.clone())
         .route("/account", index.clone())
         .route("/patches", index.clone())
         .route("/api-reference", index.clone())

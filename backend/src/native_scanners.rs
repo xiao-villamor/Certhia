@@ -1,7 +1,7 @@
 use crate::{
     App,
     artifacts::{Detection, FINDING_SOURCES},
-    domain::{Captured, Check, Finding, Package, Report},
+    domain::{Captured, Check, Finding, Package, Report, merge_findings, severity_rank},
     images,
     jobs::Activity,
     scanner::{self, Credentials, Target},
@@ -163,11 +163,18 @@ pub async fn scan(
         Some(digest) => Some(digest),
         None => Some(archive_identity(&archive).await?),
     };
-    captured.report.recount();
     captured.scanner = Some(succeeded.join(", "));
     // A failed engine leaves coverage incomplete, so earlier open findings stay open.
     // When every selected engine succeeds, missing findings resolve as they do for Trivy.
     captured.partial = !failures.is_empty();
+    if !succeeded
+        .iter()
+        .any(|tool| crate::discrepancies::SCANNERS.contains(tool))
+    {
+        captured.report.observation_complete = Some(false);
+    }
+    let detections = reconcile_aliases(&mut captured.report.findings, detections);
+    captured.report.recount();
     let provenance = serde_json::to_vec(&detections)?;
     ensure!(
         provenance.len() <= scanner::MAX_REPORT_BYTES,
@@ -176,6 +183,31 @@ pub async fn scan(
     captured
         .artifacts
         .push((FINDING_SOURCES.into(), provenance));
+    if succeeded
+        .iter()
+        .filter(|tool| crate::discrepancies::SCANNERS.contains(tool))
+        .count()
+        >= 2
+    {
+        captured = tokio::task::spawn_blocking(move || {
+            let original = |kind: &str| {
+                captured
+                    .artifacts
+                    .iter()
+                    .find(|(name, _)| name == kind)
+                    .map(|(_, bytes)| bytes.as_slice())
+            };
+            let reports = [captured.raw.as_deref(), original("grype"), original("osv")];
+            match crate::discrepancies::from_bytes(reports, original("sbom")) {
+                Ok(bytes) => captured
+                    .artifacts
+                    .push((crate::discrepancies::ARTIFACT.into(), bytes)),
+                Err(error) => tracing::warn!(%error, "Could not reconcile scanner reports"),
+            }
+            captured
+        })
+        .await?;
+    }
     Ok(captured)
 }
 
@@ -215,33 +247,57 @@ fn merge(report: &mut Report, other: Report) {
         })
         .collect();
     report.packages = packages.into_values().collect();
-    let mut findings: BTreeMap<_, Finding> = BTreeMap::new();
-    for finding in report.findings.drain(..).chain(other.findings) {
-        let key = (
-            finding.id.clone(),
-            finding.ecosystem.clone(),
-            finding.package.clone(),
-            finding.installed.clone(),
-            finding.purl.clone(),
-        );
-        let existing = findings.entry(key).or_insert_with(|| finding.clone());
-        if severity_rank(&finding.severity) > severity_rank(&existing.severity) {
-            existing.severity = finding.severity;
-        }
-        if existing.title.is_empty() {
-            existing.title = finding.title;
-        }
-        if existing.fixed.is_empty() {
-            existing.fixed = finding.fixed;
-        }
-    }
-    report.findings = findings.into_values().collect();
+    report.findings = merge_findings(report.findings.drain(..).chain(other.findings));
     report.checks.extend(other.checks);
     report.inventory_available |= other.inventory_available;
     report.size_bytes = report.size_bytes.or(other.size_bytes);
     if report.os.is_none() {
         report.os = other.os;
     }
+}
+
+fn reconcile_aliases(
+    findings: &mut Vec<Finding>,
+    detections: BTreeSet<Detection>,
+) -> BTreeSet<Detection> {
+    // One detector may supply just the GHSA that another explicitly paired with a CVE.
+    let mut links: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for finding in findings.iter().filter(|f| f.id.starts_with("CVE-")) {
+        for alias in finding.aliases.iter().filter(|id| id.starts_with("GHSA-")) {
+            links
+                .entry(alias.clone())
+                .or_default()
+                .insert(finding.id.clone());
+        }
+    }
+    let sole_cve = |alias: &str| {
+        links
+            .get(alias)
+            .filter(|ids| ids.len() == 1)
+            .and_then(BTreeSet::first)
+    };
+    if !findings.iter().any(|f| sole_cve(&f.id).is_some()) {
+        return detections;
+    }
+    for finding in findings.iter_mut() {
+        if let Some(cve) = sole_cve(&finding.id) {
+            finding
+                .aliases
+                .push(std::mem::replace(&mut finding.id, cve.clone()));
+        }
+    }
+    *findings = merge_findings(std::mem::take(findings).into_iter());
+    detections
+        .into_iter()
+        .map(|mut row| {
+            if let Some(cve) = sole_cve(&row.id) {
+                row.aliases
+                    .get_or_insert_with(Vec::new)
+                    .push(std::mem::replace(&mut row.id, cve.clone()));
+            }
+            row
+        })
+        .collect()
 }
 
 async fn run_engine(
@@ -388,7 +444,7 @@ async fn read_report(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn parse(tool: &str, json: &mut Value, reference: &str) -> Result<Report> {
+pub(crate) fn parse(tool: &str, json: &mut Value, reference: &str) -> Result<Report> {
     let mut report = Report::default();
     match tool {
         "grype" => parse_grype(json, &mut report)?,
@@ -409,10 +465,8 @@ fn field<'a>(value: &'a Value, name: &str) -> &'a str {
     value[name].as_str().unwrap_or_default()
 }
 
-fn package(value: &Value, kind: &str, distro: &str) -> Result<Package> {
-    let name = field(value, "name");
-    ensure!(!name.is_empty(), "A scanner package is missing its name.");
-    let ecosystem = match kind
+pub(crate) fn ecosystem(kind: &str, distro: &str) -> String {
+    match kind
         .split(':')
         .next()
         .unwrap_or_default()
@@ -428,7 +482,13 @@ fn package(value: &Value, kind: &str, distro: &str) -> Result<Package> {
         "gem" | "rubygems" => "gemspec".into(),
         "" => "package".into(),
         kind => kind.to_owned(),
-    };
+    }
+}
+
+fn package(value: &Value, kind: &str, distro: &str) -> Result<Package> {
+    let name = field(value, "name");
+    ensure!(!name.is_empty(), "A scanner package is missing its name.");
+    let ecosystem = ecosystem(kind, distro);
     Ok(Package {
         name: name.to_owned(),
         version: field(value, "version").to_owned(),
@@ -454,6 +514,8 @@ fn finding(
     );
     let upper = severity.to_ascii_uppercase();
     Ok(Finding {
+        aliases: Vec::new(),
+        detected_by: Vec::new(),
         id: id.to_owned(),
         ecosystem: package.ecosystem.clone(),
         package: package.name.clone(),
@@ -469,16 +531,6 @@ fn finding(
     })
 }
 
-fn severity_rank(severity: &str) -> u8 {
-    match severity {
-        "CRITICAL" => 4,
-        "HIGH" => 3,
-        "MEDIUM" => 2,
-        "LOW" => 1,
-        _ => 0,
-    }
-}
-
 fn parse_grype(json: &Value, report: &mut Report) -> Result<()> {
     ensure!(json["matches"].is_array(), "Invalid Grype report.");
     for matched in rows(&json["matches"]) {
@@ -489,7 +541,7 @@ fn parse_grype(json: &Value, report: &mut Report) -> Result<()> {
             field(&json["distro"], "name"),
         )?;
         let vuln = &matched["vulnerability"];
-        report.findings.push(finding(
+        let mut detected = finding(
             &package,
             field(vuln, "id"),
             field(vuln, "description"),
@@ -497,7 +549,11 @@ fn parse_grype(json: &Value, report: &mut Report) -> Result<()> {
             strings(&vuln["fix"]["versions"])
                 .collect::<Vec<_>>()
                 .join(", "),
-        )?);
+        )?;
+        detected.record_aliases(
+            rows(&matched["relatedVulnerabilities"]).filter_map(|item| item["id"].as_str()),
+        );
+        report.findings.push(detected);
     }
     Ok(())
 }
@@ -561,6 +617,14 @@ fn parse_dockle(json: &mut Value, reference: &str, report: &mut Report) -> Resul
 }
 
 fn parse_osv(json: &Value, report: &mut Report) -> Result<()> {
+    report
+        .findings
+        .extend(osv_findings(json)?.into_iter().map(|(_, finding)| finding));
+    Ok(())
+}
+
+pub(crate) fn osv_findings(json: &Value) -> Result<Vec<(String, Finding)>> {
+    let mut findings = Vec::new();
     ensure!(json["results"].is_array(), "Invalid OSV-Scanner report.");
     for result in rows(&json["results"]) {
         for entry in rows(&result["packages"]) {
@@ -570,11 +634,10 @@ fn parse_osv(json: &Value, report: &mut Report) -> Result<()> {
                 let id = field(vuln, "id");
                 let group = rows(&entry["groups"])
                     .find(|group| strings(&group["ids"]).any(|candidate| candidate == id));
-                let cve = group
+                let aliases = group
                     .into_iter()
-                    .flat_map(|group| strings(&group["aliases"]))
-                    .chain(strings(&vuln["aliases"]))
-                    .find(|alias| alias.starts_with("CVE-"));
+                    .flat_map(|group| strings(&group["aliases"]).chain(strings(&group["ids"])))
+                    .chain(strings(&vuln["aliases"]));
                 let score = group.and_then(|g| field(g, "max_severity").parse::<f64>().ok());
                 let detail = field(&vuln["databaseSpecific"], "severity");
                 let severity = match score {
@@ -590,23 +653,20 @@ fn parse_osv(json: &Value, report: &mut Report) -> Result<()> {
                         name == package.name || info["os_package_name"].as_str() == Some(name)
                     })
                     .flat_map(|affected| rows(&affected["ranges"]))
+                    .filter(|range| range["type"] != "GIT")
                     .flat_map(|range| rows(&range["events"]))
                     .filter_map(|event| event["fixed"].as_str())
                     .collect::<BTreeSet<_>>()
                     .into_iter()
                     .collect::<Vec<_>>()
                     .join(", ");
-                report.findings.push(finding(
-                    &package,
-                    cve.unwrap_or(id),
-                    field(vuln, "summary"),
-                    severity,
-                    fixed,
-                )?);
+                let mut detected = finding(&package, id, field(vuln, "summary"), severity, fixed)?;
+                detected.record_aliases(aliases);
+                findings.push((id.to_owned(), detected));
             }
         }
     }
-    Ok(())
+    Ok(findings)
 }
 
 fn parse_dive(json: &Value, reference: &str, report: &mut Report) -> Result<()> {
@@ -641,7 +701,7 @@ mod tests {
 
     #[test]
     fn grype_maps_findings_and_fixes() -> Result<()> {
-        let mut json = serde_json::from_str(include_str!("fixtures/scanners/grype.json"))?;
+        let mut json: Value = serde_json::from_str(include_str!("fixtures/scanners/grype.json"))?;
         let report = parse("grype", &mut json, IMAGE)?;
         let finding = &report.findings[0];
         assert_eq!(finding.id, "CVE-2099-0001");
@@ -656,6 +716,57 @@ mod tests {
             Some("pkg:apk/alpine/openssl@3.5.0-r0")
         );
         assert!(!report.inventory_available);
+        Ok(())
+    }
+
+    #[test]
+    fn paired_advisories_merge_only_for_the_same_package_version() -> Result<()> {
+        let cve = "CVE-2099-0001";
+        let ghsa = "GHSA-2345-6789-cfgh";
+        let mut json: Value = serde_json::from_str(include_str!("fixtures/scanners/grype.json"))?;
+        let mut paired = parse("grype", &mut json, IMAGE)?.findings.remove(0);
+        paired.record_aliases([ghsa, ghsa]);
+        let mut alone = paired.clone();
+        alone.id = ghsa.into();
+        alone.aliases.clear();
+        let mut other = paired.clone();
+        other.installed = "9.0".into();
+        let sources = BTreeSet::from([
+            Detection::new(&paired, "trivy"),
+            Detection::new(&alone, "grype"),
+            Detection::new(&other, "trivy"),
+        ]);
+        let mut findings = vec![paired, alone, other];
+        let sources = reconcile_aliases(&mut findings, sources);
+        assert_eq!(findings.len(), 2);
+        assert!(findings.iter().all(|f| f.id == cve && f.aliases == [ghsa]));
+        assert_eq!(
+            sources
+                .iter()
+                .filter(|r| r.id == cve && r.installed == "3.5.0-r0")
+                .count(),
+            2
+        );
+        assert!(
+            sources
+                .iter()
+                .filter(|r| r.installed == "9.0")
+                .all(|r| r.scanner == "trivy")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn multiple_cves_and_free_text_do_not_establish_an_alias() -> Result<()> {
+        let mut json: Value = serde_json::from_str(include_str!("fixtures/scanners/grype.json"))?;
+        let row = &mut json["matches"][0];
+        row["vulnerability"]["id"] = serde_json::json!("GHSA-2345-6789-cfgh");
+        row["vulnerability"]["description"] = serde_json::json!("See CVE-2099-0003");
+        row["relatedVulnerabilities"] =
+            serde_json::json!([{"id":"CVE-2099-0001"},{"id":"CVE-2099-0002"}]);
+        let result = parse("grype", &mut json, IMAGE)?;
+        assert_eq!(result.findings[0].id, "GHSA-2345-6789-cfgh");
+        assert!(result.findings[0].aliases.is_empty());
         Ok(())
     }
 

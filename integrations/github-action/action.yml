@@ -1,0 +1,33 @@
+name: Certhia image scan
+description: Scan a published image digest and link the result from your workflow.
+inputs:
+  webhook-url:
+    description: CI webhook endpoint shown in Certhia's registry connection.
+    required: true
+  webhook-token:
+    description: Registry webhook token from a GitHub Actions secret.
+    required: true
+  image:
+    description: Published OCI image reference ending in @sha256 followed by the manifest digest.
+    required: true
+  platform:
+    description: Platform to scan.
+    default: linux/amd64
+  fail-on-fixable:
+    description: Use high, critical, or none.
+    default: none
+  timeout-seconds:
+    description: Maximum time to wait for the scan.
+    default: '600'
+outputs:
+  scan-id:
+    description: Certhia scan ID.
+  report-url:
+    description: URL of the scan report. A Certhia session is required to open it.
+  fixable-high:
+    description: Count of high severity advisories with a reported fix.
+  fixable-critical:
+    description: Count of critical severity advisories with a reported fix.
+runs:
+  using: node24
+  main: scan.cjs

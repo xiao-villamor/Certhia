@@ -21,6 +21,7 @@ interface Session {
 export interface AuthStatus {
   local: boolean;
   setupRequired: boolean;
+  setupCodeRequired: boolean;
   providers: { id: string; name: string }[];
 }
 

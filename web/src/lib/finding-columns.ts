@@ -10,7 +10,7 @@ export const findingColumns = [
 ] as const;
 
 export type FindingColumn = (typeof findingColumns)[number]['id'];
-export const defaultFindingColumns: FindingColumn[] = ['package', 'installed', 'fix', 'tracking', 'issue'];
+export const defaultFindingColumns: FindingColumn[] = ['package', 'installed', 'fix', 'scanners', 'tracking', 'issue'];
 const storageKey = `${productSlug}.finding-columns`;
 
 export function readFindingColumns(): FindingColumn[] {

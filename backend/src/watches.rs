@@ -105,9 +105,11 @@ async fn enable(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Jso
     let watch=sqlx::query_as!(Watch,"INSERT INTO image_watches VALUES($1,$2,$3,now()) ON CONFLICT(reference,platform) DO UPDATE SET platform=excluded.platform RETURNING *",
         new_id,row.reference,row.platform).fetch_one(&mut *tx).await?;
     if watch.id == new_id {
-        sqlx::query!("INSERT INTO watch_seen SELECT DISTINCT $1::uuid,k.advisory_id FROM (SELECT digest_id,observed_order FROM scans JOIN scan_directory USING(id,queued_at)
-            WHERE reference=$2 AND platform=$3 AND status='completed' ORDER BY observed_order DESC LIMIT 1) d CROSS JOIN LATERAL scan_finding_keys(d.digest_id,d.observed_order) k",
-            new_id,row.reference,row.platform).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO watch_seen SELECT DISTINCT $1::uuid,k.advisory_id
+            FROM latest_completed_scans s JOIN scan_directory d USING(id,queued_at)
+            CROSS JOIN LATERAL observed_findings(s.digest_id,d.observed_order,d.scan_no,s.observation_complete IS NOT NULL) k
+            WHERE s.reference=$2 AND s.platform=$3")
+            .bind(new_id).bind(&row.reference).bind(&row.platform).execute(&mut *tx).await?;
     }
     tx.commit().await?;
     app.0
@@ -125,15 +127,15 @@ async fn remove(State(app): State<App>, Path(id): Path<Uuid>) -> ApiResult<Statu
 pub async fn record(
     tx: &mut sqlx::PgConnection,
     scan_id: Uuid,
-    digest_id: i64,
+    scan_no: i64,
     reference: &str,
     platform: &str,
 ) -> Result<()> {
-    sqlx::query!("WITH added AS (
-        INSERT INTO watch_seen SELECT DISTINCT w.id,f.advisory_id FROM image_watches w JOIN findings f ON f.digest_id=$2 AND f.resolved_scan_id IS NULL
+    sqlx::query("WITH added AS (
+        INSERT INTO watch_seen SELECT DISTINCT w.id,f.advisory_id FROM image_watches w JOIN scan_observed_findings f ON f.scan_no=$2
         WHERE w.reference=$3 AND w.platform=$4 ON CONFLICT DO NOTHING RETURNING watch_id,advisory_id
         ),alert AS(INSERT INTO watch_alerts(watch_id,scan_id,next_attempt) SELECT DISTINCT watch_id,$1::uuid,now() FROM added RETURNING id,watch_id)
-        INSERT INTO watch_alert_advisories SELECT alert.id,added.advisory_id FROM added JOIN alert USING(watch_id)",scan_id,digest_id,reference,platform).execute(tx).await?;
+        INSERT INTO watch_alert_advisories SELECT alert.id,added.advisory_id FROM added JOIN alert USING(watch_id)").bind(scan_id).bind(scan_no).bind(reference).bind(platform).execute(tx).await?;
     Ok(())
 }
 pub async fn deliver_pending(app: &App) -> Result<()> {

@@ -1,5 +1,5 @@
 use crate::{
-    domain::Report,
+    domain::{Report, scanner_names},
     report_branding::{Branding, Pixels, decode_logo},
     store::{Scan, now},
 };
@@ -71,6 +71,16 @@ pub fn build(scan: &Scan, report: &Report, branding: &Branding, scanner: &str) -
             .cmp(&severity(&b.severity))
             .then_with(|| a.id.cmp(&b.id))
     });
+    let findings: Vec<_> = findings
+        .into_iter()
+        .map(|v| {
+            let identifiers = std::iter::once(v.id.as_str())
+                .chain(v.aliases.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join("\n");
+            (v, identifiers, scanner_names(&v.detected_by))
+        })
+        .collect();
     layout.table(
         "Vulnerability findings",
         [
@@ -79,19 +89,21 @@ pub fn build(scan: &Scan, report: &Report, branding: &Branding, scanner: &str) -
             "Package",
             "Installed",
             "Fixed in",
+            "Detected by",
             "Title",
         ],
-        [96.0, 52.0, 85.0, 58.0, 87.0, 154.0],
+        [121.0, 46.0, 69.0, 48.0, 52.0, 69.0, 127.0],
         6.0,
-        findings.iter().map(|v| {
+        findings.iter().map(|(v, ids, engines)| {
             let level = severity(&v.severity);
             (
                 [
-                    v.id.as_str(),
+                    ids.as_str(),
                     SEVERITIES[level].0,
                     &v.package,
                     &v.installed,
                     &v.fixed,
+                    engines.as_str(),
                     &v.title,
                 ],
                 Some((1, SEVERITIES[level].1)),
@@ -681,10 +693,13 @@ mod tests {
             counts: None,
         };
         let mut report = Report {
+            scanners: vec![],
+            evidence_available: None,
             packages: vec![],
             findings: vec![],
             inventory_available: false,
             digest: None,
+            observation_complete: None,
             counts: Default::default(),
             checks: vec![],
             size_bytes: None,
@@ -709,6 +724,8 @@ mod tests {
 
         report.findings = (0..120)
             .map(|i| Finding {
+                aliases: vec![],
+                detected_by: vec![],
                 id: format!("CVE-2026-{i:04}"),
                 package: "container-library".into(),
                 ecosystem: "alpine".into(),

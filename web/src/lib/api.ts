@@ -49,6 +49,8 @@ export interface Package {
 }
 
 export interface Finding {
+  aliases?: string[];
+  detectedBy?: string[];
   purl?: string;
   id: string;
   ecosystem: string;
@@ -60,6 +62,8 @@ export interface Finding {
 }
 
 export interface Report {
+  scanners?: string[];
+  evidenceAvailable?: boolean;
   packages: Package[];
   findings: Finding[];
   inventoryAvailable: boolean;
@@ -68,6 +72,7 @@ export interface Report {
   checks: Check[];
   sizeBytes: number | null;
   os: string | null;
+  observationComplete?: boolean;
 }
 
 export interface Check {
@@ -103,13 +108,27 @@ export interface Change {
   after: string[];
 }
 
+export interface Observation extends Omit<Change, 'status'> {
+  advisory: string;
+  status: 'Added' | 'Removed' | 'Still detected';
+}
+
 export interface Comparison {
   baseline: Scan;
   target: Scan;
-  changes: { packages: Change[]; findings: Change[]; inventoryAvailable: boolean };
+  baselineDigest?: string;
+  targetDigest?: string;
+  scanners: string[];
+  publication?: string;
+  selected: { id: string; detected: boolean }[];
+  baselineIssues: Record<string, import('./tracking.js').TrackerIssue>;
+  targetIssues: Record<string, import('./tracking.js').TrackerIssue>;
+  changes: { packages: Change[]; observations: Observation[]; inventoryAvailable: boolean };
 }
 
 export const platforms = ['linux/amd64', 'linux/arm64', 'linux/arm/v7'];
+
+export const vulnerabilityScannerIds = new Set(['trivy', 'grype', 'osv']);
 
 export const scannerProviders = [
   { id: 'trivy', name: 'Trivy', purpose: 'Vulnerabilities, packages, and image checks' },
@@ -119,6 +138,10 @@ export const scannerProviders = [
   { id: 'osv', name: 'OSV-Scanner', purpose: 'Open source vulnerabilities' },
   { id: 'dive', name: 'Dive', purpose: 'Image layers and wasted space' }
 ];
+
+export function scannerName(id: string) {
+  return scannerProviders.find(provider => provider.id === id)?.name ?? id;
+}
 
 export interface ScannerAvailability {
   registry: string[];

@@ -56,6 +56,8 @@ pub fn actor() -> Option<Uuid> {
 pub struct Config {
     local: bool,
     secure: bool,
+    /// Plain HTTP and HTTPS origins both reach the dashboard (`auto` cookie mode).
+    mixed: bool,
     origin: Option<Url>,
     trusted_proxies: Vec<IpAddr>,
     setup_hash: Option<[u8; 32]>,
@@ -67,13 +69,19 @@ pub struct Config {
 
 pub struct Startup {
     pub config: Config,
-    pub setup_code: Option<String>,
 }
 
 impl Config {
     pub fn load(allowed_hosts: &[String]) -> Result<Startup> {
         let local = flag("CERTHIA_AUTH_LOCAL", true)?;
-        let secure = flag("CERTHIA_AUTH_SECURE_COOKIE", true)?;
+        // `auto` serves both HTTPS and plain HTTP (for example a LAN address next to
+        // a TLS proxy). Cookies then omit Secure, so use it only on trusted networks.
+        let (secure, mixed) = match optional_env("CERTHIA_AUTH_SECURE_COOKIE").as_deref() {
+            None | Some("1") => (true, false),
+            Some("0") => (false, false),
+            Some("auto") => (false, true),
+            Some(_) => bail!("CERTHIA_AUTH_SECURE_COOKIE must be 0, 1 or auto"),
+        };
         let providers = oidc::providers()?;
         ensure!(
             local || !providers.is_empty(),
@@ -94,11 +102,11 @@ impl Config {
                     && url.host_str().is_some_and(|host| allowed_hosts
                         .iter()
                         .any(|allowed| allowed.eq_ignore_ascii_case(host)))
-                    && url.scheme() == if secure { "https" } else { "http" },
+                    && (mixed || url.scheme() == if secure { "https" } else { "http" }),
                 "CERTHIA_AUTH_ORIGIN must be an origin covered by CERTHIA_ALLOWED_HOSTS and match the cookie security setting"
             );
         }
-        if !secure {
+        if !secure && !mixed {
             ensure!(
                 allowed_hosts.iter().all(|host| access::loopback(host)),
                 "Insecure cookies require loopback-only CERTHIA_ALLOWED_HOSTS"
@@ -118,24 +126,23 @@ impl Config {
             .transpose()
             .context("CERTHIA_AUTH_TRUSTED_PROXIES must contain literal IP addresses")?
             .unwrap_or_default();
+        // Setup is open until the first administrator exists. A configured token
+        // additionally gates it for deployments reachable before setup completes.
         let setup_code = if local {
-            let code = match secret_env("CERTHIA_SETUP_TOKEN")? {
-                Some(code) => code,
-                None => random_token()?,
-            };
+            secret_env("CERTHIA_SETUP_TOKEN")?
+        } else {
+            None
+        };
+        if let Some(code) = &setup_code {
             ensure!(
                 code.len() >= 32 && code.len() <= 512 && !code.chars().any(char::is_control),
                 "CERTHIA_SETUP_TOKEN must contain 32–512 characters without control characters"
             );
-            Some(code)
-        } else {
-            None
-        };
-        let generated = optional_env("CERTHIA_SETUP_TOKEN").is_none()
-            && optional_env("CERTHIA_SETUP_TOKEN_FILE").is_none();
+        }
         let config = Self {
             local,
             secure,
+            mixed,
             origin,
             trusted_proxies,
             setup_hash: setup_code.as_ref().map(|code| hash(code.as_bytes())),
@@ -144,10 +151,7 @@ impl Config {
             dummy_hash: accounts::password_hash(&random_token()?)?,
             password_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
         };
-        Ok(Startup {
-            config,
-            setup_code: setup_code.filter(|_| generated),
-        })
+        Ok(Startup { config })
     }
 
     fn cookie_name(&self, name: &'static str) -> String {
@@ -311,6 +315,7 @@ mod tests {
             auth: Config {
                 local: true,
                 secure: true,
+                mixed: false,
                 origin: Some(Url::parse("https://certhia.example").unwrap()),
                 trusted_proxies: Vec::new(),
                 setup_hash: None,

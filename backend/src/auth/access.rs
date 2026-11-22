@@ -46,6 +46,7 @@ pub fn classify(method: &str, path: &str) -> Option<Access> {
         | ("GET", "/auth/oidc/{provider}/callback") => Public,
         ("POST", "/auth/login" | "/auth/setup" | "/auth/oidc/{provider}/start") => PublicMutation,
         ("POST", "/webhooks/registries/{id}/ci" | "/webhooks/registries/{id}/harbor") => Machine,
+        ("GET" | "HEAD", "/webhooks/registries/{id}/ci/{scan_id}") => Machine,
         (
             "GET" | "HEAD",
             "/auth/me"
@@ -56,6 +57,7 @@ pub fn classify(method: &str, path: &str) -> Option<Access> {
             | "/scans/{id}"
             | "/scans/{id}/events"
             | "/scans/{id}/progress"
+            | "/scans/{id}/previous"
             | "/scans/{id}/classifications"
             | "/scans/{id}/watch"
             | "/scans/{id}/report/{format}"
@@ -112,6 +114,7 @@ pub fn classify(method: &str, path: &str) -> Option<Access> {
             | "/images/{id}/publish"
             | "/patches/execute"
             | "/patches/{id}/publish"
+            | "/patch-publications/{id}/scan"
             | "/scheduled-scans"
             | "/scheduled-scans/{id}/execute",
         )
@@ -262,6 +265,12 @@ fn same_origin(config: &super::Config, headers: &HeaderMap) -> bool {
     let Some(origin) = single_header(headers, header::ORIGIN) else {
         return false;
     };
+    if config.mixed {
+        // The configured public origin applies to its own host only.
+        return ["https", "http"]
+            .into_iter()
+            .any(|scheme| origin_matches(origin, scheme, &authority, None));
+    }
     let scheme = if config.secure { "https" } else { "http" };
     origin_matches(origin, scheme, &authority, config.origin.as_ref())
 }

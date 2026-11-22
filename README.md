@@ -2,7 +2,9 @@
 
 <img src="web/static/certhia.png" alt="Certhia logo" width="64">
 
-Certhia is a self-hosted workspace for scanning container images, comparing versions, and tracking vulnerability remediation. Axum serves the API and the static SvelteKit dashboard from one Rust process, with PostgreSQL for scan history, findings, and jobs.
+Certhia tracks vulnerabilities in the Docker images you build or run. See which image versions reported an advisory, link the finding to an issue, and follow what changes from one scan to the next.
+
+Certhia is self-hosted. Axum serves the API and the static SvelteKit dashboard from one Rust process, with PostgreSQL for scan history, findings, and jobs.
 
 ## Run with Docker
 
@@ -10,7 +12,7 @@ Certhia is a self-hosted workspace for scanning container images, comparing vers
 docker compose up -d --build --wait
 ```
 
-Open <http://localhost:3001>. The dashboard binds to loopback by default. On first run, get the setup code with `docker compose logs app` and create the first administrator in the browser, or set `CERTHIA_ADMIN_EMAIL` and `CERTHIA_ADMIN_PASSWORD_FILE` before starting. See [Sign-in and workspace access](docs/auth.md) for bootstrap, roles, OIDC, and recovery. Set `CERTHIA_PORT` to change the host port. Compose starts a separate PostgreSQL 17 service on its internal network. The app checks database reachability and migration state at `/api/ready`. The liveness endpoint is `/api/health`.
+Open <http://localhost:3001>. The dashboard binds to loopback by default. On first run, create the first administrator in the browser, choose your default scanners, then scan a public image or import a report. You can instead set `CERTHIA_ADMIN_EMAIL` and `CERTHIA_ADMIN_PASSWORD_FILE` before starting. See [Sign-in and workspace access](docs/auth.md) for bootstrap, roles, OIDC, and recovery. Set `CERTHIA_PORT` to change the host port. Compose starts a separate PostgreSQL 17 service on its internal network. The app checks database reachability and migration state at `/api/ready`. The liveness endpoint is `/api/health`.
 
 The standard image includes Trivy for scanning and Skopeo for image operations. Trivy downloads its vulnerability database on the first scan. For an existing deployment, keep its Compose project, database credentials, and volume mappings. Set `POSTGRES_USER` and `POSTGRES_DB` to the initialized database values, keep its existing password, and map existing named volumes in a local Compose override before starting the renamed services. Include `compose.scanners.yaml` to install additional local scanners.
 
@@ -42,6 +44,42 @@ Back up the registry key, raw report bucket or shared volume, and uploaded archi
 
 The Kubernetes manifest in `deploy/kubernetes.yaml` uses an external database. Set its image to your build, configure the allowed hostname, provide `DATABASE_URL` and optionally `DATABASE_READ_URL` in the `certhia-database` Secret, and mount the existing key as `registry.key` in the `certhia-key` Secret. For CloudNativePG, use its primary read/write service for migrations and writes and its read-only service for the optional replica connection. For managed PostgreSQL, configure TLS verification and mount the provider CA as required. Provide first-admin bootstrap credentials in the deployment Secret or configure a shared setup code across replicas. The sample uses a ReadWriteMany volume for archive inputs, patch outputs and filesystem report storage. Configure a storage class with RWX support. Application containers may be replaced independently.
 
+## View finding changes between scans
+
+In **Report comparison**, choose two completed scans for the same platform with comparable vulnerability evidence. Review which advisory and package pairs were newly detected, still detected, or no longer detected. Choose **Download security changelog** to share those observations and the two report links in an issue or release notes. See [Image vulnerability tracking](docs/image-vulnerability-tracking.md) for how scans, issue links, and published-image comparisons work.
+
+## Explain scanner differences
+
+A scan with completed reports from at least two vulnerability engines (Trivy, Grype, or OSV-Scanner) includes **Scanner differences** on the report page and `discrepancies.json` in its ZIP export. Each finding lists its detectors and known advisory aliases. Search a report by either its CVE or its GHSA. Syft appears in the scan summary when it supplies the package inventory.
+
+To compare any two or all three original JSON reports offline, build the existing Rust binary and run its `explain` subcommand from the checkout.
+
+```sh
+cargo build --release --locked --manifest-path backend/Cargo.toml
+backend/target/release/digestdesk explain --trivy trivy.json --grype grype.json --osv osv.json --same-input
+```
+
+Use `--json` for machine-readable output. The comparison checks available image identifiers and platforms. When the reports came from the same image or SBOM and lack a common image ID, add `--same-input` to record that fact. Add `--sbom inventory.cdx.json` with `--same-input` to supply the associated CycloneDX source-package metadata. Conflicting image IDs are rejected.
+
+The comparator reconciles explicit advisory aliases and one-to-one Alpine binary/source relationships for the same package version. A difference in severity or fixed versions, an ambiguous source, or a finding reported by a single scanner remains available for review. The explanation includes any CPE matching evidence recorded by Grype. Tracking decisions are independent of reconciliation.
+
+## Benchmark report processing
+
+```sh
+backend/target/release/digestdesk bench explain --synthetic 8000 --warmup 5 --iterations 40 > before.json
+backend/target/release/digestdesk bench explain --trivy trivy.json --grype grype.json --iterations 40 > local-reports.json
+backend/target/release/digestdesk bench compare before.json after.json
+```
+
+The synthetic size counts candidate advisories. Each run records input hashes, output counts and hash, all timed samples, median and p95 in milliseconds. The total covers JSON decoding, matching and serialization. File reads and fixture generation happen before timing. Use the same workload and build profile for both runs. A negative median change means the candidate took less time.
+
+For an existing completed scan on a test instance, set `CERTHIA_BENCH_COOKIE` to that instance’s session cookie and run the following. This measures sequential, authenticated HTTP reads through the last response byte, including the scan detail, JSON report, inventory and discrepancy report when available. Both API variants must serve the same database scan at the same URL for `bench compare`. Warm-up and measured requests share a connection pool.
+
+```sh
+backend/target/release/digestdesk bench report --base-url http://127.0.0.1:3001 --scan-id "$SCAN_ID" --warmup 5 --iterations 40 > api.json
+```
+
+
 ## Scan a private image
 
 1. Open **Registry connections → Add registry** and enter the exact registry host, username, and token or password with pull access.
@@ -50,19 +88,19 @@ The Kubernetes manifest in `deploy/kubernetes.yaml` uses an external database. S
 
 Some registries issue tokens from a different host than the one that serves images. When the registry's `WWW-Authenticate` challenge names another token service, enter that hostname under **Connection options → Separate token host** for catalog browsing. A scoped pull token can work when the registry disables catalog listing.
 
-Provider catalog settings accept an organization, user, or group for Docker Hub, GHCR, and GitLab, an owner for Gitea, a repository for Nexus, or `project/repository` for Google Artifact Registry. GitLab tokens need API access for provider catalog browsing and registry access to pull. With Artifact Registry, use `oauth2accesstoken`, `_json_key`, or `_json_key_base64` as appropriate for your credentials. Other registries can be browsed using their OCI catalog when enabled. The registry editor supports HTTP and self-signed endpoints when explicitly configured.
+Provider catalog settings accept an organization, user, or group for Docker Hub, GHCR, and GitLab, an owner for Gitea and Forgejo, a repository for Nexus, or `project/repository` for Google Artifact Registry. GitLab tokens need API access for provider catalog browsing and registry access to pull. With Artifact Registry, use `oauth2accesstoken`, `_json_key`, or `_json_key_base64` as appropriate for your credentials. Other registries can be browsed using their OCI catalog when enabled. The registry editor supports HTTP and self-signed endpoints when explicitly configured. See [Private registry connections](docs/private-registries.md).
 
 ## Workflows
 
 - Scan registry images by tag or digest, discover Docker and Swarm images or Kubernetes pods, upload a Docker image archive, or import Trivy JSON.
 - Queue batches, prioritize jobs, cancel pending or running scans, and view live progress. Set `CERTHIA_MAX_CONCURRENT_SCANS` to raise local concurrency.
-- Compare completed scans or resolve two registry references to immutable digests. Review package updates and advisories added or removed by a change.
+- Compare completed scans or resolve two registry references to immutable digests. Review package updates alongside changes in recorded detections.
 - Browse image histories and vulnerability details, classify findings, inspect layers, export image archives, and publish to a registry.
 - Review vulnerability findings grouped by ecosystem, and filter reports or the advisory index by ecosystem.
 - Triage vulnerabilities by image version. Tracking follows the same reference, digest, and platform across repeat scans. Use **Linked issues only** to find tracked work.
-- Download PDF, Excel, Markdown, JSON, CycloneDX SBOM, OpenVEX, and ZIP reports. View the available per-scanner artifacts in each scan.
+- Download PDF, Excel, Markdown, JSON, CycloneDX or SPDX SBOM, OpenVEX, and ZIP reports. View the available per-scanner artifacts in each scan.
 - Schedule specific images, all tracked images, or regex-based image and tag selection. See execution history and use **Run now** for an immediate run.
-- Configure scan and audit retention, test notifications, analyze patch candidates, save a dry run, and build a patched OCI image with BuildKit.
+- Configure scan and audit retention, test notifications, analyze patch candidates, save a dry run, and build a patched OCI image with BuildKit. After publishing, optionally scan the published digest and compare its report with the source.
 - Choose default scanner providers in **Workspace preferences**.
 - Queue an image scan from CI after a push or subscribe to Harbor push events from **Registry connections**.
 - Open **API reference** at `/api-reference` for routes and request parameters. The service exposes `/api/health`, `/api/ready`, `/api/version`, and `/api/openapi.json`.
@@ -71,7 +109,7 @@ Provider catalog settings accept an organization, user, or group for Docker Hub,
 
 In **Workspace preferences → Issue trackers**, add a named tracker. Copy an issue URL from the project and replace its ID with `{id}`. For example, use `https://tracker.example.com/browse/{id}` for an issue URL ending in `/browse/SEC-123`. Set up a tracker for each project that uses a different URL template. HTTP and HTTPS links to self-hosted trackers are supported.
 
-Open a finding's status for the affected image version, select the saved tracker, and enter the issue ID. Each version can link to its own issue. Changes to a tracker's template apply to future links. Existing links keep their saved URLs, including when a tracker is removed.
+Open a finding's tracking details for the affected image version. If you need to create an issue, use **Copy issue draft** to take the scan evidence to your tracker. Select the saved tracker, enter the issue ID, and choose a scope. Use **All images for this CVE** for a shared ticket, or attach an image-specific issue. Use **Exception** to record a reason and expiry across versions of a reference or repository on the selected platform. See [Image vulnerability tracking](docs/image-vulnerability-tracking.md).
 
 ## Watch for newly detected vulnerabilities
 
@@ -79,9 +117,19 @@ On a completed scan, choose **Watch new vulnerabilities**. Certhia uses the late
 
 See alerts and delivery status under **Workspace preferences → Image watches**. External delivery uses the destination in **Notifications**. Turn off ordinary scan completion notifications if you only want vulnerability alerts.
 
+## Scan a Kubernetes pod image or a Swarm service image
+
+In **Start scan**, choose **Kubernetes**, enter the namespace, and select **Find pod images**. Choose an image from the results, verify its reference and platform, and select **Start scan**. For private images, choose a registry connection that can pull the image.
+
+Discovery shows the pods, workloads, and containers using each image. Certhia uses the running manifest digest when Kubernetes reports a pullable digest. To queue scans when deployments change, select **Kubernetes digest changes** when creating a schedule. See [Kubernetes discovery and scheduling](docs/kubernetes-discovery-scheduling.md).
+
+For Swarm, connect Certhia to a manager’s Docker socket. Choose **Docker Swarm → Find service images** to scan an individual service or scan all unique service image digests. Local Docker discovery labels images used by running containers.
+
 ## Export supply chain reports
 
-Open **SBOM and VEX** on a completed report to download CycloneDX 1.6 or OpenVEX 0.2.0. Available documents are also included in the ZIP bundle. OpenVEX describes the scanned image. Record a false positive with an explanatory note on that scan to document a `not_affected` decision. Findings without a qualifying review are exported as `under_investigation`.
+On a completed scan, open **Report contents** to download CycloneDX 1.6 or SPDX 2.3 JSON. Both formats include package URLs when the scanner supplies them. To obtain an inventory, choose Trivy or Syft for the scan, or import a Trivy JSON report with packages. For scheduled scans, enable **Retain a CycloneDX SBOM** to store an SBOM with each report that has package inventory.
+
+Use **OpenVEX** in the same section to download OpenVEX 0.2.0 for the scanned image. Available documents are also included in the ZIP bundle. Record a false positive with an explanatory note on that scan to document a `not_affected` decision. Findings without a qualifying review are exported as `under_investigation`.
 
 ## Optional deployment features
 
@@ -107,6 +155,22 @@ Open **Registry connections**, choose **Webhook** on a saved connection, and gen
 
 For CI, run this after the image is published. Set `CERTHIA_WEBHOOK_URL` to the CI endpoint, `CERTHIA_WEBHOOK_TOKEN` to the token, and `IMAGE_REFERENCE` to the published reference. Prefer the digest when a job must scan the exact artifact it built.
 
+The repository includes a [GitHub Action](integrations/github-action/action.yml) that waits for the scan, links the report from the job summary, and can block on fixable high or critical advisories. Reference a commit that contains the action. The publishing step must provide the complete image reference and digest to the following step.
+
+```yaml
+- name: Scan the published digest
+  uses: xiao-villamor/Certhia/integrations/github-action@<commit-sha>
+  with:
+    webhook-url: ${{ vars.CERTHIA_WEBHOOK_URL }}
+    webhook-token: ${{ secrets.CERTHIA_WEBHOOK_TOKEN }}
+    image: ${{ steps.publish.outputs.image }}@${{ steps.publish.outputs.digest }}
+    fail-on-fixable: critical
+```
+
+The action requires a complete vulnerability scan. Omit `fail-on-fixable` to report the counts without a severity gate. The gate counts each advisory once at its highest fixable severity from this scan. Tracking decisions and exceptions apply to the workspace triage views. Protect the registry token as a GitHub Actions secret and use the step in a trusted workflow after publishing.
+
+To queue a scan from another CI system, call the webhook directly.
+
 ```sh
 jq -n --arg reference "$IMAGE_REFERENCE" '{reference: $reference}' |
   curl --fail-with-body --silent --show-error \
@@ -117,7 +181,7 @@ jq -n --arg reference "$IMAGE_REFERENCE" '{reference: $reference}' |
 
 For Harbor, create an HTTP webhook for **Artifact pushed** in the project. Paste the Harbor endpoint and put the token in **Auth Header**. Both Default and CloudEvents payloads work. The registry host in the event must match the saved connection, and a digest is used when available. See the [Harbor webhook configuration guide](https://goharbor.io/docs/main/working-with-projects/project-configuration/configure-webhooks/).
 
-Both endpoints return scan IDs with HTTP `202`. Matching scans already queued or running return their existing IDs. The default platform is `linux/amd64`. CI can send `platform` for another supported platform. Scans use the workspace scanner defaults when they start, and explicit engine choices on manual scans take precedence. If none of the workspace choices are available for a source, it uses Trivy.
+Both endpoints return scan IDs with HTTP `202`. Matching scans already queued or running return their existing IDs. CI can append `/{scanId}` to the CI endpoint and send a GET with the same bearer token to read the status and summary for up to 24 hours. The dashboard report requires a workspace session. The default platform is `linux/amd64`. CI can send `platform` for another supported platform. Scans use the workspace scanner defaults when they start, and explicit engine choices on manual scans take precedence. If none of the workspace choices are available for a source, it uses Trivy.
 
 If CI or Harbor needs to reach a remote dashboard, expose the webhook delivery paths under `/api/webhooks/registries/` through your TLS proxy and forward the `Authorization` header. Registry management requires a signed-in administrator. Webhook delivery keeps its registry token authentication.
 

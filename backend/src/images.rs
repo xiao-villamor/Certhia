@@ -178,7 +178,7 @@ pub async fn copy(
     host: &str,
     auth: Option<Credentials>,
     insecure: bool,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let dir = tempfile::tempdir()?;
     let source_file = dir.path().join("source.json");
     let destination_file = dir.path().join("destination.json");
@@ -203,9 +203,16 @@ pub async fn copy(
     if transport.starts_with("dir:") {
         command.arg("--dest-decompress");
     }
+    let digest_file = dir.path().join("published-digest");
+    if transport.starts_with("docker://") {
+        command.arg("--digestfile").arg(&digest_file);
+    }
     command.arg(source.transport).arg(transport);
     run(command, "Skopeo", Duration::from_secs(30 * 60)).await?;
-    Ok(())
+    Ok(tokio::fs::read_to_string(digest_file)
+        .await
+        .ok()
+        .map(|digest| digest.trim().to_owned()))
 }
 
 pub async fn attachment(

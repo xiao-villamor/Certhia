@@ -40,6 +40,12 @@ struct Selection {
     tag_pattern: String,
     #[serde(default)]
     exclude_tag_pattern: String,
+    #[serde(default)]
+    retain_sbom: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kubernetes_namespace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kubernetes_host: Option<String>,
 }
 
 #[derive(Clone, Copy, Default, Deserialize, Serialize)]
@@ -49,6 +55,7 @@ enum Mode {
     Specific,
     Pattern,
     All,
+    Kubernetes,
 }
 
 #[derive(Deserialize)]
@@ -117,6 +124,10 @@ async fn write(app: &App, id: String, input: ScheduleInput, existing: bool) -> A
     }
     let next_due = next(&input.expression).map_err(ApiError::bad)?;
     let mut selection = input.selection;
+    selection.kubernetes_host = None;
+    if !matches!(selection.mode, Mode::Kubernetes) {
+        selection.kubernetes_namespace = None;
+    }
     let (reference, platform, registry_id, source) = match selection.mode {
         Mode::Specific => {
             let mut refs = std::mem::take(&mut selection.references);
@@ -159,6 +170,28 @@ async fn write(app: &App, id: String, input: ScheduleInput, existing: bool) -> A
             filters(&selection).map_err(ApiError::bad)?;
             selection.references.clear();
             (String::new(), input.scan.platform, None, "registry".into())
+        }
+        Mode::Kubernetes => {
+            crate::validate_platform(&input.scan.platform)?;
+            selection.kubernetes_namespace = crate::discovery::validate_namespace(
+                selection.kubernetes_namespace.as_deref().map(str::trim),
+            )?
+            .map(str::to_owned);
+            selection.references.clear();
+            if let Some(id) = &input.scan.registry_id {
+                selection.kubernetes_host = Some(
+                    crate::registries::credential_record(app, id)
+                        .await?
+                        .ok_or_else(|| ApiError::missing("Saved registry not found."))?
+                        .0,
+                );
+            }
+            (
+                String::new(),
+                input.scan.platform,
+                input.scan.registry_id,
+                "kubernetes".into(),
+            )
         }
     };
     let sql = if existing {
@@ -295,9 +328,9 @@ struct Run {
     total: usize,
 }
 
-async fn enqueue(app: &App, id: &str, manual: bool) -> Result<Option<Run>> {
+async fn enqueue(app: &App, id: &str, manual: bool) -> ApiResult<Option<Run>> {
     let mut tx = app.0.database.primary.begin().await?;
-    let key = Uuid::parse_str(id)?;
+    let key = crate::key(id)?;
     let Some(item) = sqlx::query_as::<_, Saved>(sqlx::AssertSqlSafe(format!(
         "{SELECT} WHERE schedules.id=$1 FOR UPDATE"
     )))
@@ -311,7 +344,9 @@ async fn enqueue(app: &App, id: &str, manual: bool) -> Result<Option<Run>> {
     if manual {
         sqlx::query!("INSERT INTO schedule_runs(id,schedule_id,name,nominal_time,trigger) VALUES($1,$2,$3,now(),'manual')",run,key,item.name).execute(&mut *tx).await?;
     } else {
-        let next = next(&item.expression)?.parse::<chrono::DateTime<Utc>>()?;
+        let next = next(&item.expression)?
+            .parse::<chrono::DateTime<Utc>>()
+            .map_err(anyhow::Error::from)?;
         if !sqlx::query_scalar!(
             r#"SELECT fire_schedule($1,$2,$3,$4) AS "fired!""#,
             key,
@@ -326,6 +361,11 @@ async fn enqueue(app: &App, id: &str, manual: bool) -> Result<Option<Run>> {
         }
     }
     let specific = matches!(item.selection.mode, Mode::Specific);
+    let kubernetes = if matches!(item.selection.mode, Mode::Kubernetes) {
+        Some(kubernetes_targets(&mut tx, key, &item).await?)
+    } else {
+        None
+    };
     let filters = filters(&item.selection)?;
     let mut cursor = (String::new(), String::new());
     let mut result = Run {
@@ -334,7 +374,19 @@ async fn enqueue(app: &App, id: &str, manual: bool) -> Result<Option<Run>> {
         total: 0,
     };
     loop {
-        let chunk: Vec<Target> = if specific {
+        let chunk: Vec<Target> = if let Some(references) = &kubernetes {
+            references
+                .iter()
+                .map(|reference| {
+                    (
+                        reference.clone(),
+                        item.platform.clone(),
+                        item.registry_id.clone(),
+                        item.source.clone(),
+                    )
+                })
+                .collect()
+        } else if specific {
             let refs = if item.selection.references.is_empty() {
                 std::slice::from_ref(&item.reference)
             } else {
@@ -356,7 +408,7 @@ async fn enqueue(app: &App, id: &str, manual: bool) -> Result<Option<Run>> {
                 ORDER BY reference,platform,queued_at DESC,id DESC LIMIT 200")
                 .bind(&cursor.0).bind(&cursor.1).fetch_all(&mut *tx).await?
         };
-        let done = specific || chunk.len() < 200;
+        let done = kubernetes.is_some() || specific || chunk.len() < 200;
         if let Some(last) = chunk.last() {
             cursor = (last.0.clone(), last.1.clone());
         }
@@ -369,7 +421,7 @@ async fn enqueue(app: &App, id: &str, manual: bool) -> Result<Option<Run>> {
                 images.push(reference);
                 platforms.push(platform);
                 sources.push(source);
-                profiles.push(profile.as_deref().map(Uuid::parse_str).transpose()?);
+                profiles.push(profile.as_deref().map(crate::key).transpose()?);
                 if result.scans.len() < 200 {
                     result.scans.push(id);
                 }
@@ -387,6 +439,12 @@ async fn enqueue(app: &App, id: &str, manual: bool) -> Result<Option<Run>> {
             )
             .execute(&mut *tx)
             .await?;
+            if item.selection.retain_sbom {
+                sqlx::query("UPDATE scan_jobs SET retain_sbom=true WHERE scan_id=ANY($1)")
+                    .bind(&ids)
+                    .execute(&mut *tx)
+                    .await?;
+            }
             result.total += ids.len();
         }
         if done {
@@ -403,6 +461,42 @@ async fn enqueue(app: &App, id: &str, manual: bool) -> Result<Option<Run>> {
         )
         .await?;
     Ok(Some(result))
+}
+
+async fn kubernetes_targets(
+    tx: &mut sqlx::PgTransaction<'_>,
+    schedule: Uuid,
+    item: &Saved,
+) -> ApiResult<std::collections::BTreeSet<String>> {
+    let namespace = item.selection.kubernetes_namespace.as_deref();
+    let host = item.selection.kubernetes_host.as_deref();
+    if host.is_some() && item.registry_id.is_none() {
+        return Err(ApiError::bad(
+            "Choose a registry connection for this Kubernetes schedule.",
+        ));
+    }
+    let scope = json!([namespace, item.platform, item.registry_id]);
+    let previous = sqlx::query_scalar::<_, sqlx::types::Json<crate::discovery::RuntimeImages>>(
+        "SELECT images FROM schedule_kubernetes_observations WHERE schedule_id=$1 AND scope=$2",
+    )
+    .bind(schedule)
+    .bind(&scope)
+    .fetch_optional(&mut **tx)
+    .await?
+    .map(|value| value.0)
+    .unwrap_or_default();
+    let (current, changed) =
+        crate::discovery::kubernetes_observation(namespace, host, &previous).await?;
+    sqlx::query(
+        "INSERT INTO schedule_kubernetes_observations (schedule_id,scope,images) VALUES ($1,$2,$3)
+        ON CONFLICT(schedule_id) DO UPDATE SET scope=excluded.scope,images=excluded.images",
+    )
+    .bind(schedule)
+    .bind(scope)
+    .bind(sqlx::types::Json(current))
+    .execute(&mut **tx)
+    .await?;
+    Ok(changed)
 }
 
 async fn execute(
@@ -675,6 +769,14 @@ async fn cleanup(app: &App) -> Result<()> {
     .execute(&app.0.database.primary)
     .await?;
     let mut tx = app.0.database.primary.begin().await?;
+    sqlx::query(
+        "DELETE FROM scan_observed_findings o USING scan_directory d
+        WHERE o.scan_no=d.scan_no AND d.queued_at < now()-make_interval(days=>$1)
+        AND NOT EXISTS (SELECT FROM scans s WHERE (s.id,s.queued_at)=(d.id,d.queued_at))",
+    )
+    .bind(i32::try_from(settings.scan_days)?)
+    .execute(&mut *tx)
+    .await?;
     let batches = i32::try_from(settings.batch_days)?;
     sqlx::query!(
         "DELETE FROM batches WHERE created_at<now()-$1::integer * interval '1 day'",

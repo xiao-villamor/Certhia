@@ -8,21 +8,25 @@ web
 
 ## Users
 
-Platform and DevOps engineers use Certhia to triage vulnerabilities in the container images they operate and check whether an image update resolves them. They need to identify the affected version, review the scan evidence, and carry a remediation decision through to a follow-up scan or linked issue.
+Certhia is for people who need to know which vulnerabilities have been reported in the Docker images they build or run. Platform engineers can follow findings across services, application maintainers can follow their own images across releases, and security teams can look up which scanned versions reported an advisory.
 
 ## Product Purpose
 
-Certhia is a self-hosted workspace for scanning container images, comparing versions, and tracking remediation. An engineer should be able to explain which image version was scanned, which findings changed between versions, and what action was taken on each tracked finding.
+Keep a history of what each image scan reported. For a given advisory, a team should be able to see which image versions reported it, whether it appeared in the latest completed scan, and which issue tracks it.
 
 ## Positioning
 
-Certhia connects scan evidence and remediation to the container image version it applies to. Tracking follows the image reference, digest, platform, and advisory across repeat scans. Engineers can compare completed reports to see which advisories were added or removed and which packages changed.
+Certhia is a self-hosted vulnerability tracker for Docker images. Each report records scanner observations for a particular image version and platform. A later scan supplies the next observation, even when the image itself has stayed the same and the scanner’s advisory data has changed.
+
+## Product direction
+
+Build on today’s issue links and Markdown comparison export. The proposed workflow would register a finding in the team’s issue tracker and attach later scan observations to the same issue. A release security changelog would summarize what the scans reported as newly detected, still detected, or no longer detected. The team manages ticket status in its tracker.
 
 ## Operating Context
 
 - Engineers work from registry tags or digests, images discovered in Docker, Swarm, or Kubernetes, uploaded Docker image archives, or imported Trivy reports.
 - Scans can be started manually, queued in batches, scheduled, or triggered by CI and Harbor push events. Watch alerts use a completed scan as the baseline and report newly detected advisories on subsequent scans of the same reference and platform.
-- Engineers review the scan report, record finding status and notes, and link findings to their existing issue tracker. They can compare with a later report to verify the outcome of an update.
+- Engineers review scan reports, record notes and status, and link findings to their existing issue tracker. They can compare completed reports to see how the findings changed.
 - The browser dashboard is self-hosted. The standard Compose deployment binds to loopback. Shared deployments use a TLS proxy and require users to sign in with a local account or an OpenID Connect provider.
 
 ## Capabilities and Constraints
@@ -46,5 +50,5 @@ The user-facing product name is Certhia, as used in the dashboard and README.
 ## Product Principles
 
 1. Keep image-version evidence and remediation together. Show which reference, digest, and platform a finding or decision applies to.
-2. Make the outcome of an update verifiable. Show package changes and advisory changes between versions so engineers can see what the update resolved and what still needs attention.
+2. Describe changes in terms of scanner evidence. “No longer detected” means the later completed scan did not report the finding. A failed or missing scan supplies no new observation.
 3. Preserve remediation decisions across repeat scans of the same image version, and keep linked issues and notes traceable to the relevant finding.

@@ -3,13 +3,13 @@
   import AdvisoryDetails from '#lib/AdvisoryDetails.svelte';
   import ConfigDialog from '#lib/ConfigDialog.svelte';
   import IssueLink from '#lib/IssueLink.svelte';
-  import { allPages, api, classifications, message, post, shortDigest } from '#lib/api.js';
-  import { detectionKey, findingDetectors } from '#lib/finding-evidence.js';
-  import { classificationsPath, issueTrackersPath, trackerName, type FindingTracking, type IssueTracker, type TrackerIssue, type TrackingTarget } from '#lib/tracking.js';
+  import { allPages, api, classifications, message, post, scannerName, shortDigest, type Finding, type ScanDetail } from '#lib/api.js';
+  import { detectionKey } from '#lib/finding-evidence.js';
+  import { classificationsPath, findingReportPath, issueTrackersPath, trackerName, type ExceptionScope, type FindingException, type FindingTracking, type IssueScope, type IssueTracker, type TrackerIssue, type TrackingTarget } from '#lib/tracking.js';
 
-  let { target, scanners, evidencePending = false, evidenceUnavailable = false, dismiss, onSaved }: {
+  let { target, findingSources, evidencePending = false, evidenceUnavailable = false, dismiss, onSaved }: {
     target?: TrackingTarget;
-    scanners?: string[];
+    findingSources?: Map<string, string[]>;
     evidencePending?: boolean;
     evidenceUnavailable?: boolean;
     dismiss: () => void;
@@ -17,26 +17,70 @@
   } = $props();
   let status = $state('open');
   let note = $state('');
+  let savedException = $state<FindingException>();
+  let exceptionMode = $state<'keep' | 'set' | 'revoke'>('keep');
+  let exceptionScope = $state<ExceptionScope>('reference');
+  let exceptionReason = $state('');
+  let exceptionExpiry = $state('');
   const keepExisting = 'existing';
   let trackers = $state<IssueTracker[]>([]);
   let trackerId = $state('');
+  let scope = $state<IssueScope>('advisory');
   let stored = $state<TrackerIssue>();
   let storedChoice = $state('');
   let key = $state('');
   let loaded = $state(false);
   let busy = $state(false);
   let error = $state('');
-  let detected = $state<string[]>([]);
+  let handoff = $state('');
+  let copied = $state(false);
+  const setupPath = $derived(target ? '/settings?' + new URLSearchParams({
+    section: 'issue-trackers', next: findingReportPath(target.scanId, target.finding, true)
+  }) : '/settings?section=issue-trackers');
+
+  async function draftIssue(entry: TrackingTarget) {
+    const link = new URL(findingReportPath(entry.scanId, entry.finding), window.location.origin);
+    handoff = [
+      entry.finding + (scope === 'advisory' ? ' · affected packages and images' : ' detected in ' + entry.reference),
+      ...(scope === 'advisory' ? ['All affected images: ' + new URL('/library/' + encodeURIComponent(entry.finding), window.location.origin).href] : []),
+      '',
+      'Image: ' + entry.reference,
+      'Platform: ' + entry.platform,
+      ...(entry.digest?.startsWith('sha256:') ? ['Manifest digest: ' + entry.digest] : []),
+      'Scan report: ' + link.href,
+      '',
+      ...details.map(detail => '- ' + detail.package + ' (' + detail.ecosystem + ') ' + detail.installed
+        + (detail.fixed ? ' · Reported fix ' + detail.fixed : '')),
+      '',
+      'Presence reflects the findings reported in this scan.'
+    ].join('\n');
+    try {
+      await navigator.clipboard.writeText(handoff);
+      if (target === entry) copied = true;
+    } catch {
+      if (target === entry) copied = false;
+    }
+  }
+  let refreshedDetails = $state<Finding[]>();
   let detectorLoading = $state(false);
   let detectorError = $state(false);
   let advisoryOpen = $state(false);
-  const detectorNames = $derived(scanners ?? detected);
-  const detectorStatus = $derived((scanners === undefined ? detectorLoading : evidencePending)
-    ? 'Loading…' : detectorNames.join(', ') || ((scanners === undefined ? detectorError : evidenceUnavailable) ? 'Unavailable' : 'Not recorded'));
+  const details = $derived(refreshedDetails ?? target?.details ?? []);
+  const evidence = $derived(details.map(detail => ({
+    detail,
+    names: [...new Set((detail.detectedBy?.length ? detail.detectedBy.map(scannerName)
+      : findingSources?.get(detectionKey(detail))) ?? [])].sort()
+  })));
+  const detectorNames = $derived([...new Set(evidence.flatMap(row => row.names))].sort());
+  const aliases = $derived([...new Set(details.flatMap(detail => detail.aliases ?? []))]);
+  const detectorStatus = $derived((findingSources ? evidencePending : detectorLoading)
+    ? 'Loading…' : (findingSources ? evidenceUnavailable : detectorError) ? 'Unavailable' : 'Not recorded');
+  const showPackageDetectors = $derived(evidence.length > 1
+    && evidence.some(row => row.names.join(', ') !== evidence[0].names.join(', ')));
 
   $effect(() => {
     const entry = target;
-    loaded = false; error = ''; advisoryOpen = false;
+    loaded = false; error = ''; advisoryOpen = false; handoff = ''; copied = false;
     if (!entry) return;
     const controller = new AbortController();
     const options = {signal:controller.signal};
@@ -48,11 +92,17 @@
       const saved = items.find(item => item.finding === entry.finding);
       status = saved?.status ?? 'open';
       note = saved?.note ?? '';
+      savedException = saved?.exception;
+      exceptionMode = 'keep';
+      exceptionScope = saved?.exception?.scope ?? 'reference';
+      exceptionReason = saved?.exception?.reason ?? '';
+      exceptionExpiry = saved?.exception?.expiresAt.slice(0, 10) ?? '';
       trackers = configured;
       stored = saved?.issue ?? undefined;
       storedChoice = stored
         ? configured.find(tracker => tracker.id === stored?.trackerId)?.id ?? keepExisting : '';
       trackerId = storedChoice;
+      scope = stored ? (stored.scope ?? 'image') : 'advisory';
       key = stored?.key ?? '';
       loaded = true;
     }).catch(issue => {
@@ -63,14 +113,17 @@
 
   $effect(() => {
     const entry = target;
-    detected = [];
+    refreshedDetails = undefined;
     detectorError = false;
     detectorLoading = false;
-    if (scanners !== undefined || !entry?.details.length) return;
+    if (findingSources || !entry) return;
     const request = new AbortController();
     detectorLoading = true;
-    void findingDetectors(entry.scanId, request.signal).then(found => {
-      if (!request.signal.aborted) detected = [...new Set(entry.details.flatMap(detail => found.get(detectionKey(detail)) ?? []))].sort();
+    void api<ScanDetail>('/scans/' + entry.scanId, {signal:request.signal}).then(scan => {
+      if (request.signal.aborted) return;
+      const all = scan.report?.findings.filter(finding => finding.id === entry.finding);
+      if (all?.length) refreshedDetails = all;
+      detectorError = scan.report?.evidenceAvailable === false;
     }).catch(() => {
       if (!request.signal.aborted) detectorError = true;
     }).finally(() => {
@@ -86,10 +139,14 @@
     busy = true; error = '';
     const issueId = key.trim();
     const unchanged = trackerId === keepExisting
-      || (stored && trackerId === storedChoice && issueId === stored.key);
+      || (stored && trackerId === storedChoice && issueId === stored.key && scope === (stored.scope ?? 'image'));
     const payload = {
       finding:entry.finding, status, note,
-      ...(unchanged ? {} : {issue:trackerId ? {trackerId, key:issueId} : null})
+      ...(exceptionMode === 'set' ? {exceptionEdit:{
+        action:'set', scope:exceptionScope, reason:exceptionReason,
+        expiresAt:exceptionExpiry + 'T23:59:59.999Z'
+      }} : exceptionMode === 'revoke' ? {exceptionEdit:{action:'revoke', scope:exceptionScope}} : {}),
+      ...(unchanged || (!trackerId && !stored) ? {} : {issueScope:scope, issue:trackerId ? {trackerId, key:issueId} : null})
     };
     try {
       await api(classificationsPath(entry.scanId), {...post(payload), method:'PUT'});
@@ -101,81 +158,170 @@
   }
 </script>
 
+{#snippet issueDraft()}
+  {#if target}
+    <button type="button" class="button secondary" onclick={() => target && draftIssue(target)}>Copy issue draft</button>
+    {#if copied}<p class="field-help" role="status">Issue draft copied.</p>
+    {:else if handoff}<label class="field"><span>Issue draft</span><textarea readonly rows="6" value={handoff}></textarea></label>{/if}
+  {/if}
+{/snippet}
+
 <ConfigDialog id="finding-tracker" title={target?.finding ?? 'Vulnerability details'}
   description={target ? target.reference + ' · ' + target.platform : undefined} open={!!target} {busy} {dismiss} onsubmit={save}>
-  {#if loaded}
-    <fieldset class="tracking-status" disabled={busy || !auth.operator}>
-      <legend>Tracking status</legend>
-      <div class="status-options">
-        {#each classifications as [value,label] (value)}
-          <label><input type="radio" {value} bind:group={status} />{label}</label>
-        {/each}
+  {#if evidence.length}
+    {@const first = evidence[0].detail}
+    <section class="finding-summary" aria-label="Vulnerability evidence">
+      <div class="context-heading">
+        <span class={'severity ' + first.severity.toLowerCase()}>{first.severity.toLowerCase()}</span>
+        {#if first.title}<p>{first.title}</p>{/if}
       </div>
-    </fieldset>
-    {#if target}<p class="field-help">Status and issue link apply to this image version and platform.{#if target.digest}{' '}<span class="mono break" title={target.digest}>{shortDigest(target.digest)}</span>{/if}</p>{/if}
+      {#if aliases.length}<p class="field-help mono">{aliases.join(' · ')}</p>{/if}
+      <div class="detectors" aria-label="Detected by">
+        <span class="field-help">Detected by</span>
+        {#each detectorNames as name (name)}<span class="detector">{name}</span>
+        {:else}<span class="field-help" role="status">{detectorStatus}</span>{/each}
+      </div>
+    </section>
+  {/if}
+
+  {#if loaded}
+    <div class="tracking-grid">
+      <label class="field"><span>Tracking status</span>
+        <select bind:value={status} disabled={busy || !auth.operator}>
+          {#each classifications as [value, label]}<option {value}>{label}</option>{/each}
+        </select>
+        <small>This image version and platform{#if target?.digest}{' · '}<span class="mono" title={target.digest}>{shortDigest(target.digest)}</span>{/if}</small>
+      </label>
+      {#if stored}
+        <div class="linked-issue">
+          <span class="field-help">{stored.scope === 'advisory' ? 'Shared ticket' : 'Image ticket'}</span>
+          <IssueLink issue={stored} />
+          {#if stored.scope === 'advisory' && target}
+            <a class="table-link" href={'/library/' + encodeURIComponent(target.finding)}>View affected images</a>
+          {/if}
+        </div>
+      {/if}
+    </div>
+    {#if savedException || auth.operator}
+      <details class="form-disclosure" open={!!savedException || exceptionMode !== 'keep'}>
+        <summary>{savedException ? 'Active exception' : 'Exception'}</summary>
+        <div class="disclosure-body">
+          {#if savedException && exceptionMode !== 'set'}
+            <p>{savedException.reason}</p>
+            <p class="field-help">
+              {savedException.scope === 'repository' ? 'All references in this repository' : 'This image reference'}
+              · {target?.platform} · Expires {savedException.expiresAt.slice(0, 10)} UTC
+            </p>
+          {/if}
+          {#if auth.operator}
+            {#if exceptionMode === 'set'}
+              <label class="field"><span>Exception scope</span>
+                <select bind:value={exceptionScope} disabled={busy || !!savedException}>
+                  <option value="reference">This tag or digest reference on {target?.platform}</option>
+                  <option value="repository">All references in this repository on {target?.platform}</option>
+                </select>
+                <small>Applies to this advisory. A tag or repository exception applies to future versions in that scope.</small>
+              </label>
+              <label class="field"><span>Reason</span>
+                <textarea bind:value={exceptionReason} rows="2" required maxlength="4000" disabled={busy}></textarea>
+              </label>
+              <label class="field"><span>Expiry date (UTC)</span>
+                <input type="date" bind:value={exceptionExpiry} required disabled={busy} />
+                <small>Expires at the end of the selected day.</small>
+              </label>
+              <button type="button" class="button secondary" onclick={() => exceptionMode = 'keep'} disabled={busy}>Cancel change</button>
+            {:else if exceptionMode === 'revoke'}
+              <p class="field-help" role="status">The exception will be removed when you save tracking.</p>
+              <button type="button" class="button secondary" onclick={() => exceptionMode = 'keep'} disabled={busy}>Keep exception</button>
+            {:else}
+              <div class="exception-actions">
+                <button type="button" class="button secondary" onclick={() => exceptionMode = 'set'} disabled={busy}>
+                  {savedException ? 'Edit exception' : 'Add exception'}
+                </button>
+                {#if savedException}
+                  <button type="button" class="button secondary" onclick={() => exceptionMode = 'revoke'} disabled={busy}>Remove exception</button>
+                {/if}
+              </div>
+            {/if}
+          {/if}
+        </div>
+      </details>
+    {/if}
+    {#if auth.operator && (trackers.length || stored)}
+      <details class="form-disclosure" open={!stored && trackers.length > 0}>
+        <summary>{stored ? 'Manage issue link' : 'Link a ticket'}</summary>
+        <div class="disclosure-body">
+          <div class="tracking-grid">
+            <label class="field"><span>Issue tracker</span>
+              <select bind:value={trackerId} disabled={busy}>
+                <option value="">No linked issue</option>
+                {#if storedChoice === keepExisting}<option value={keepExisting}>Keep existing link</option>{/if}
+                {#each trackers as tracker (tracker.id)}
+                  <option value={tracker.id}>{tracker.name} · {trackerName(tracker.provider)}</option>
+                {/each}
+              </select>
+            </label>
+            {#if trackerId && trackerId !== keepExisting}
+              <label class="field"><span>Issue ID</span>
+                <input class="mono" required maxlength="101" placeholder="SEC-123 or 42" bind:value={key} disabled={busy} />
+              </label>
+            {/if}
+          </div>
+          {#if (trackerId && trackerId !== keepExisting) || (!trackerId && stored)}
+            <label class="field"><span>{trackerId ? 'Ticket scope' : 'Link to remove'}</span>
+              <select bind:value={scope} disabled={busy}>
+                <option value="advisory">All images for this CVE</option>
+                <option value="image">This image version and platform</option>
+              </select>
+              {#if trackerId && scope === 'advisory'}<small>Reuse one ticket across affected packages and images. Image-specific links take priority.</small>{/if}
+            </label>
+          {/if}
+          {@render issueDraft()}
+        </div>
+      </details>
+    {:else if !stored && auth.admin}
+      <p class="field-help"><a href={setupPath}>Set up an issue tracker</a> to link a ticket.</p>
+    {:else if !stored && auth.operator}
+      <p class="field-help">Ask a workspace administrator to configure an issue tracker.</p>
+    {/if}
+    {#if auth.operator && !trackers.length && !stored}
+      <details class="form-disclosure">
+        <summary>Issue draft</summary>
+        <div class="disclosure-body">{@render issueDraft()}</div>
+      </details>
+    {/if}
   {:else if !error}
     <p class="field-help" role="status">Loading tracking details…</p>
   {/if}
-  {#if target?.details.length}
-    {@const finding = target.details[0]}
-    <section class="finding-context" aria-label="Vulnerability evidence">
-      <div class="context-heading">
-        <span class={'severity ' + finding.severity.toLowerCase()}>{finding.severity.toLowerCase()}</span>
-        {#if finding.title}<p>{finding.title}</p>{/if}
-      </div>
-      {#if target.details.length === 1}
-        <dl>
-          <div><dt>Package</dt><dd>{finding.package}</dd></div>
-          <div><dt>Installed</dt><dd>{finding.installed || 'Unknown'}</dd></div>
-          <div><dt>Reported fix</dt><dd>{finding.fixed || 'None reported'}</dd></div>
-          <div><dt>Detected by</dt><dd>{detectorStatus}</dd></div>
-        </dl>
-      {:else}
-        <div class="table-wrap"><table class="package-evidence">
-          <thead><tr><th scope="col">Package</th><th scope="col">Installed</th><th scope="col">Reported fix</th></tr></thead>
-          <tbody>{#each target.details as detail}
-            <tr><td>{detail.package}<small>{detail.ecosystem}</small></td><td>{detail.installed || 'Unknown'}</td><td>{detail.fixed || 'None reported'}</td></tr>
-          {/each}</tbody>
-        </table></div>
-        <dl><div><dt>Detected by</dt><dd>{detectorStatus}</dd></div></dl>
-      {/if}
-    </section>
+  {#if evidence.length}
+    <details class="form-disclosure">
+      <summary>Affected packages ({evidence.length})</summary>
+      <div class="table-wrap"><table class="package-evidence">
+        <thead><tr><th scope="col">Package</th><th scope="col">Installed</th><th scope="col">Reported fix</th>
+          {#if showPackageDetectors}<th scope="col">Detected by</th>{/if}
+        </tr></thead>
+        <tbody>{#each evidence as {detail, names}}
+          <tr><td>{detail.package}<small>{detail.ecosystem}</small></td><td>{detail.installed || 'Unknown'}</td>
+            <td>{detail.fixed || 'None reported'}</td>{#if showPackageDetectors}<td>{names.join(', ') || detectorStatus}</td>{/if}
+          </tr>
+        {/each}</tbody>
+      </table></div>
+    </details>
   {/if}
   {#if loaded}
-    <label class="field"><span>Note {#if auth.operator}<small>Optional</small>{/if}</span>
-      <textarea rows="3" maxlength="4000" bind:value={note} disabled={busy} readonly={!auth.operator}></textarea>
-      {#if status === 'false_positive'}<small>An explanatory note is included in this scan’s OpenVEX export.</small>{/if}
+    <label class="field tracking-note"><span>Note {#if auth.operator}<small>Optional</small>{/if}</span>
+      <textarea rows="2" maxlength="4000" bind:value={note} disabled={busy} readonly={!auth.operator}></textarea>
+      {#if status === 'false_positive'}<small>The OpenVEX export includes this note.</small>{/if}
     </label>
-    {#if auth.operator && (trackers.length || stored)}
-    <label class="field"><span>Issue tracker</span>
-      <select bind:value={trackerId} disabled={busy}>
-        <option value="">No linked issue</option>
-        {#if storedChoice === keepExisting}<option value={keepExisting}>Keep existing link</option>{/if}
-        {#each trackers as tracker (tracker.id)}
-          <option value={tracker.id}>{tracker.name} · {trackerName(tracker.provider)}</option>
-        {/each}
-      </select>
-    </label>
-    {#if trackerId && trackerId !== keepExisting}
-      <label class="field"><span>Issue ID</span>
-        <input class="mono" required maxlength="101" placeholder="SEC-123 or 42" bind:value={key} disabled={busy} />
-      </label>
-    {/if}
-    {#if stored && trackerId === storedChoice && (trackerId === keepExisting || key === stored.key)}
-      <p class="field-help">Current issue <IssueLink issue={stored} /></p>
-    {/if}
-    {:else if stored}
-      <p class="field-help">Current issue <IssueLink issue={stored} /></p>
-    {:else if auth.admin}
-      <p class="field-help"><a href="/settings?section=issue-trackers">Set up an issue tracker</a> to link this vulnerability to an issue.</p>
-    {/if}
   {/if}
   {#if target}
     <details class="form-disclosure" bind:open={advisoryOpen}>
       <summary>Advisory details</summary>
       <div class="disclosure-body">
         {#if advisoryOpen}<AdvisoryDetails id={target.finding} compact />{/if}
-        <a class="advisory-link" href={'/library/' + encodeURIComponent(target.finding)}>View all affected images</a>
+        {#if stored?.scope !== 'advisory'}
+          <a class="advisory-link" href={'/library/' + encodeURIComponent(target.finding)}>View all affected images</a>
+        {/if}
       </div>
     </details>
   {/if}
@@ -188,21 +334,18 @@
 
 
 <style>
-  .finding-context { display: grid; gap: .8rem; padding: .85rem; border: 1px solid var(--line); border-radius: var(--radius); background: var(--canvas); }
-  .context-heading { display: flex; align-items: flex-start; gap: .55rem; }
-  .context-heading p { font-size: .85rem; font-weight: 750; overflow-wrap: anywhere; }
-  .finding-context dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .65rem 1rem; margin: 0; }
-  .finding-context dt { color: var(--muted); font-size: var(--text-detail); }
-  .finding-context dd { margin: .16rem 0 0; font-size: var(--text-label); font-weight: 750; overflow-wrap: anywhere; }
+  .exception-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+  :global(#finding-tracker) { width: min(43rem, calc(100% - 2rem)); }
+  .finding-summary { display: grid; gap: .55rem; padding-bottom: .85rem; border-bottom: 1px solid var(--line); }
+  .context-heading, .detectors { display: flex; align-items: baseline; flex-wrap: wrap; gap: .4rem .55rem; }
+  .context-heading p { font-size: var(--text-label); font-weight: 750; overflow-wrap: anywhere; }
+  .detector { padding: .15rem .45rem; border: 1px solid var(--line); border-radius: 6px; font-size: var(--text-detail); font-weight: 650; }
+  .tracking-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .85rem; align-items: start; }
+  .linked-issue { display: grid; justify-items: start; gap: .3rem; }
+  .tracking-note textarea { min-height: 3.6rem; }
   .package-evidence :is(th, td) { padding: .4rem .55rem; }
   .advisory-link { justify-self: start; color: var(--accent-ink); font-size: .82rem; font-weight: 800; text-underline-offset: 3px; }
-  .tracking-status { min-width: 0; margin: 0; padding: 0; border: 0; }
-  .tracking-status legend { margin-bottom: .5rem; padding: 0; font-size: var(--text-label); font-weight: 750; }
-  .status-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 9rem), 1fr)); gap: .4rem; }
-  .status-options label { display: flex; align-items: center; gap: .45rem; min-height: 44px; padding: .4rem .5rem; border: 1px solid var(--control-line); border-radius: 6px; font-size: var(--text-label); cursor: pointer; }
-  .status-options label:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
-  .status-options input { flex: none; min-height: auto; margin: 0; accent-color: var(--accent); }
   @media (max-width: 480px) {
-    .status-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .tracking-grid { grid-template-columns: 1fr; }
   }
 </style>

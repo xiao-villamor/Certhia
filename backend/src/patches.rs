@@ -34,6 +34,7 @@ pub fn routes() -> Router<App> {
         .route("/patches/{id}/status", get(status))
         .route("/patches/{id}/download", get(download))
         .route("/patches/{id}/publish", post(publish))
+        .route("/patch-publications/{id}/scan", post(scan_publication))
 }
 
 fn candidates(report: &[u8]) -> Result<Vec<Value>> {
@@ -279,9 +280,14 @@ async fn build(
     Ok(())
 }
 
-const SELECT: &str = "SELECT jsonb_build_object('id',id,'scanId',scan_id,'reference',reference,'platform',platform,'status',status,'createdAt',created_at,'finishedAt',finished_at,'error',error,'packages',packages) FROM patches";
+const SELECT: &str = "SELECT jsonb_build_object('id',p.id,'scanId',p.scan_id,'reference',p.reference,'platform',p.platform,
+    'status',p.status,'createdAt',p.created_at,'finishedAt',p.finished_at,'error',p.error,'packages',p.packages,
+    'publication',(SELECT jsonb_build_object('id',pub.id,'reference',pub.reference,'pinnedReference',pub.pinned_reference,
+        'scanId',pub.scan_id,'publishedAt',pub.published_at)
+        FROM patch_publications pub WHERE pub.patch_id=p.id ORDER BY pub.id DESC LIMIT 1))
+    FROM patches p";
 async fn get_one(app: &App, id: &str) -> ApiResult<Value> {
-    sqlx::query_scalar(sqlx::AssertSqlSafe(format!("{SELECT} WHERE id=$1")))
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!("{SELECT} WHERE p.id=$1")))
         .bind(crate::key(id)?)
         .fetch_optional(&app.0.database.primary)
         .await?
@@ -295,7 +301,7 @@ async fn history(
     axum::extract::Query(page): axum::extract::Query<crate::IdPage>,
 ) -> ApiResult<crate::List<Value>> {
     let rows: Vec<Value> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "{SELECT} WHERE $1::uuid IS NULL OR id<$1 ORDER BY id DESC LIMIT $2"
+        "{SELECT} WHERE $1::uuid IS NULL OR p.id<$1 ORDER BY p.id DESC LIMIT $2"
     )))
     .bind(page.cursor)
     .bind(page.limit()? + 1)
@@ -326,6 +332,11 @@ async fn publish(
     if job["status"] != "completed" {
         return Err(ApiError::bad("The patch has not completed."));
     }
+    let registry = destination
+        .registry_id
+        .as_deref()
+        .map(crate::key)
+        .transpose()?;
     let (target, auth, insecure) = images::destination(&app, destination).await?;
     if ImageReference::parse(job["reference"].as_str().unwrap_or_default(), None)
         .is_ok_and(|source| source.value == target.value)
@@ -341,7 +352,7 @@ async fn publish(
         insecure: false,
         platform: job["platform"].as_str().unwrap_or("linux/amd64").to_owned(),
     };
-    images::copy(
+    let digest = images::copy(
         source,
         &format!("docker://{}", target.value),
         &target.host,
@@ -350,9 +361,89 @@ async fn publish(
     )
     .await
     .map_err(ApiError::bad)?;
+    let pinned = digest.and_then(|digest| {
+        ImageReference::parse(
+            &format!("{}@{digest}", crate::operations::repository(&target.value)),
+            None,
+        )
+        .ok()
+        .filter(|reference| reference.value.contains('@'))
+        .map(|reference| reference.value)
+    });
+    let publication = Uuid::now_v7();
+    sqlx::query("INSERT INTO patch_publications(id,patch_id,reference,pinned_reference,registry_id,used_registry)
+        VALUES($1,$2,$3,$4,(SELECT id FROM registry_profiles WHERE id=$5),$5 IS NOT NULL)")
+        .bind(publication).bind(crate::key(&id)?).bind(&target.value).bind(&pinned).bind(registry)
+        .execute(&app.0.database.primary).await?;
     app.0
         .database
-        .audit("patch.published", &id, &target.value)
+        .audit(
+            "patch.published",
+            &id,
+            pinned.as_deref().unwrap_or(&target.value),
+        )
         .await?;
-    Ok(Json(json!({"reference":target.value})))
+    Ok(Json(
+        json!({"id":publication,"reference":target.value,"pinnedReference":pinned}),
+    ))
+}
+
+async fn scan_publication(
+    State(app): State<App>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    let mut tx = app.0.database.primary.begin().await?;
+    let (baseline, platform, reference, registry, used_registry, existing):
+        (Uuid, String, Option<String>, Option<Uuid>, bool, Option<Uuid>) = sqlx::query_as(
+        "SELECT p.scan_id,p.platform,pub.pinned_reference,pub.registry_id,pub.used_registry,pub.scan_id
+        FROM patch_publications pub JOIN patches p ON p.id=pub.patch_id WHERE pub.id=$1 FOR UPDATE OF pub")
+        .bind(id).fetch_optional(&mut *tx).await?
+        .ok_or_else(|| ApiError::missing("Publication not found."))?;
+    let scan = if let Some(existing) = existing {
+        existing
+    } else {
+        let reference = reference.ok_or_else(|| {
+            ApiError::bad("The publish operation did not record a manifest digest.")
+        })?;
+        if used_registry && registry.is_none() {
+            return Err(ApiError::bad(
+                "The destination registry connection was removed.",
+            ));
+        }
+        let baseline_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT FROM scan_directory d JOIN scans s USING(id,queued_at)
+                WHERE d.id=$1 AND s.status='completed' AND s.observation_complete IS DISTINCT FROM false)")
+            .bind(baseline).fetch_one(&mut *tx).await?;
+        if !baseline_exists {
+            return Err(ApiError::bad(
+                "The source scan is unavailable or has incomplete evidence.",
+            ));
+        }
+        let scan = Uuid::now_v7();
+        let input = crate::ImageTarget {
+            reference,
+            platform,
+            registry_id: registry.map(|id| id.to_string()),
+            source: "registry".into(),
+            priority: 0,
+            scanners: vec!["trivy".into()],
+        };
+        if !crate::jobs::insert_queued(&mut tx, &scan.to_string(), &input).await? {
+            return Err(ApiError(
+                StatusCode::TOO_MANY_REQUESTS,
+                "The scan queue is full.".into(),
+            ));
+        }
+        sqlx::query("UPDATE patch_publications SET scan_id=$2 WHERE id=$1")
+            .bind(id)
+            .bind(scan)
+            .execute(&mut *tx)
+            .await?;
+        scan
+    };
+    tx.commit().await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({"baseline":baseline,"target":scan,"publication":id})),
+    ))
 }

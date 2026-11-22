@@ -26,7 +26,7 @@ async function request(path, {method = 'GET', data, token, authorization, expect
   });
   if (!(Array.isArray(expected) ? expected.includes(response.status) : response.status === expected)) throw new Error(method + ' ' + path + ' returned ' + response.status + ' ' + await response.text());
   if (raw) return Buffer.from(await response.arrayBuffer());
-  return expected === 204 ? undefined : response.json();
+  return response.status === 204 ? undefined : response.json();
 }
 
 // Fixture registry names can fail locally before a cancellation gets to the worker.

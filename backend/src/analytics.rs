@@ -54,16 +54,35 @@ impl Page {
 }
 async fn dashboard(State(app): State<App>) -> ApiResult<Json<Value>> {
     let rows=sqlx::query!(r#"SELECT s.name,coalesce(sum(c.total),0)::bigint AS "total!" FROM severities s LEFT JOIN dashboard_counts c ON c.severity_id=s.id GROUP BY s.name"#).fetch_all(&app.0.database.reads).await?;
-    let counts = rows
+    let historical = rows
         .into_iter()
         .map(|r| (r.name, json!(r.total)))
         .collect::<serde_json::Map<_, _>>();
+    let (counts, fixable, incomplete): (Value, i64, i64) = sqlx::query_as(
+        "WITH findings AS (
+           SELECT l.id,k.advisory_id,k.severity_id,bool_or(k.fixed_in IS NOT NULL) AS fixable
+           FROM latest_completed_scans l JOIN scan_directory sd USING(id,queued_at)
+           CROSS JOIN LATERAL observed_findings(l.digest_id,sd.observed_order,sd.scan_no,l.observation_complete IS NOT NULL) k
+           LEFT JOIN image_finding_tracking t
+             ON (t.repository_id,t.digest_id,t.reference,t.platform,t.advisory_id)
+              =(l.repository_id,l.digest_id,l.reference,l.platform,k.advisory_id)
+           WHERE coalesce(t.status,'open')='open'
+             AND NOT EXISTS (SELECT FROM active_finding_exception(l.repository_id,k.advisory_id,l.platform,l.reference))
+           GROUP BY l.id,k.advisory_id,k.severity_id
+         ), totals AS (
+           SELECT s.name,count(f.advisory_id) AS total,count(f.advisory_id) FILTER (WHERE f.fixable) AS fixable
+           FROM severities s LEFT JOIN findings f ON f.severity_id=s.id GROUP BY s.name
+         )
+         SELECT jsonb_object_agg(name,total),sum(fixable)::bigint,
+            (SELECT count(*) FROM latest_completed_scans WHERE observation_complete=false)
+         FROM totals",
+    ).fetch_one(&app.0.database.reads).await?;
     let row=sqlx::query!(r#"SELECT coalesce(sum(total),0)::bigint AS "scans!",coalesce(sum(total) FILTER(WHERE status='completed'),0)::bigint AS "completed!",
         coalesce(sum(total) FILTER(WHERE status IN ('queued','running')),0)::bigint AS "active!",
         coalesce(sum(total) FILTER(WHERE status='failed'),0)::bigint AS "failed!",
         (SELECT count(*) FROM registry_profiles) AS "registries!" FROM scan_status_counts WHERE to_regclass('scans_'||to_char(month,'YYYYMM')) IS NOT NULL"#).fetch_one(&app.0.database.reads).await?;
     Ok(Json(
-        json!({"severity":counts,"scans":row.scans,"completed":row.completed,"registries":row.registries,"active":row.active,"failed":row.failed}),
+        json!({"severity":counts,"historicalSeverity":historical,"openWithFix":fixable,"incompleteLatest":incomplete,"scans":row.scans,"completed":row.completed,"registries":row.registries,"active":row.active,"failed":row.failed}),
     ))
 }
 async fn top_packages(State(app): State<App>, Query(q): Query<Page>) -> ApiResult<Json<Value>> {
