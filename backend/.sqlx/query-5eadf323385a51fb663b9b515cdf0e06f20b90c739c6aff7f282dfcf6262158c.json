@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT provider,url_template FROM issue_trackers WHERE id=$1 FOR SHARE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "provider",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue_trackers",
+            "name": "provider"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "url_template",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue_trackers",
+            "name": "url_template"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "5eadf323385a51fb663b9b515cdf0e06f20b90c739c6aff7f282dfcf6262158c"
+}

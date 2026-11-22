@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT count(*)>=50 AS \"full!\" FROM scan_jobs",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "full!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "82b6f5591853a6e81d7ad08d65deae21380e799dbb3ca67efa7a5e5335d82551"
+}

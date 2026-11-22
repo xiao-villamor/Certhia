@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT renew_scan($1,$2,$3) AS \"renewed!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "renewed!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "669404b6c9d5df14faeca6dde3864f2b2d3c583cd88f524cafda37f95825f221"
+}

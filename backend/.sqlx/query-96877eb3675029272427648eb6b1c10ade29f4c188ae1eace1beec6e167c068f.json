@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO patches(id,scan_id,reference,platform,status,created_at,packages)\n        SELECT $1,$2,$3,$4,$5,now(),$6 WHERE $5='planned' OR (SELECT count(*) FROM patches WHERE status IN ('queued','running'))<2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "96877eb3675029272427648eb6b1c10ade29f4c188ae1eace1beec6e167c068f"
+}

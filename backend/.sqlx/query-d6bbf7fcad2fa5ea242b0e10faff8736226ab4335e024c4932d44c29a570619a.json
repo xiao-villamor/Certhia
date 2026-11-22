@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO scan_directory(id,queued_at,observed_order) VALUES($1,$2,nextval('observation_order')) RETURNING scan_no",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "scan_no",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "scan_directory",
+            "name": "scan_no"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d6bbf7fcad2fa5ea242b0e10faff8736226ab4335e024c4932d44c29a570619a"
+}

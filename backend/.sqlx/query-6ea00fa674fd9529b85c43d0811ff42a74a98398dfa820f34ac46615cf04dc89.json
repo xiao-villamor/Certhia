@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT object_key,owned FROM artifact_refs WHERE scan_id=$1 AND kind=$2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "object_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_refs",
+            "name": "object_key"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "owned",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "artifact_refs",
+            "name": "owned"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "6ea00fa674fd9529b85c43d0811ff42a74a98398dfa820f34ac46615cf04dc89"
+}

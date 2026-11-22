@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO registry_webhooks(registry_id,token_hash,created_at)\n        SELECT id,$2,$3 FROM registry_profiles WHERE id=$1 ON CONFLICT(registry_id)\n        DO UPDATE SET token_hash=excluded.token_hash,created_at=excluded.created_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bytea",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "704af6ef6b6b261e528d60d3113c0b41b473e4b3f958e6760aa5dc38ff19bc28"
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH released AS (UPDATE scan_jobs SET lease_id=NULL,lease_until=NULL,worker=NULL WHERE worker=$1 RETURNING scan_id,queued_at)\n        UPDATE scans s SET status='queued' FROM released r WHERE s.id=r.scan_id AND s.queued_at=r.queued_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ff6c81320de5da9fee0b23cd46f3adfb1821ae06e02248f5d76cc58354469a1c"
+}

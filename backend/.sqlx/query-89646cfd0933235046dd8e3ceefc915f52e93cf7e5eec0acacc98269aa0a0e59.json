@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO schedule_runs(id,schedule_id,name,nominal_time,trigger) VALUES($1,$2,$3,now(),'manual')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "89646cfd0933235046dd8e3ceefc915f52e93cf7e5eec0acacc98269aa0a0e59"
+}

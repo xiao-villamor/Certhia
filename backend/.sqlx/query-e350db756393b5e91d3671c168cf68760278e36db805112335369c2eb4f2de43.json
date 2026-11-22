@@ -1,0 +1,49 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT coalesce(sum(total),0)::bigint AS \"scans!\",coalesce(sum(total) FILTER(WHERE status='completed'),0)::bigint AS \"completed!\",\n        coalesce(sum(total) FILTER(WHERE status IN ('queued','running')),0)::bigint AS \"active!\",\n        coalesce(sum(total) FILTER(WHERE status='failed'),0)::bigint AS \"failed!\",\n        (SELECT count(*) FROM registry_profiles) AS \"registries!\" FROM scan_status_counts WHERE to_regclass('scans_'||to_char(month,'YYYYMM')) IS NOT NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "scans!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "completed!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "active!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "failed!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "registries!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "e350db756393b5e91d3671c168cf68760278e36db805112335369c2eb4f2de43"
+}

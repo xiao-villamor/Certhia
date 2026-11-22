@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO stored_blobs VALUES($1,now()) ON CONFLICT(object_key) DO UPDATE SET touched_at=now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7d702f41d5b195b62e1d6a113d347ec3a6aa8b391f9c664171c10921c7293585"
+}

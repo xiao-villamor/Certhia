@@ -1,0 +1,59 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT s.status,s.error,s.started_at,\n        CASE WHEN s.status='queued' THEN 1+(SELECT count(*) FROM scan_jobs q WHERE q.lease_id IS NULL\n            AND (-q.priority,q.queued_at,q.scan_id)<(-s.priority,s.queued_at,s.id)) ELSE 0 END AS \"position!\"\n        FROM scans s JOIN scan_directory d USING(id,queued_at) WHERE d.id=$1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "scans",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "error",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "scans",
+            "name": "error"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "started_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "scans",
+            "name": "started_at"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "position!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      null
+    ]
+  },
+  "hash": "93023086922a9bf3d5cd6b10d88fbcc89ed34508e12b206378feea5f29fcf843"
+}

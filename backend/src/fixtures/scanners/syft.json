@@ -1,0 +1,10 @@
+{
+  "artifacts": [{
+    "name": "openssl", "version": "3.5.0-r0", "type": "apk", "purl": "pkg:apk/alpine/openssl@3.5.0-r0",
+    "locations": [{"path": "/lib/apk/db/installed", "layerID": "sha256:second"}]
+  }],
+  "distro": {"id": "alpine", "prettyName": "Alpine Linux 3.22"},
+  "source": {"type": "image", "metadata": {
+    "imageSize": 12345, "layers": [{"digest": "sha256:first"}, {"digest": "sha256:second"}]
+  }}
+}

@@ -1,0 +1,100 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT host,p.secret,provider,auth_host,protocol,skip_tls,namespace\n        FROM registry_profiles p JOIN registries r ON r.id=p.registry_id\n        JOIN registry_config c ON c.registry_id=p.id WHERE p.id=$1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "host",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "registries",
+            "name": "host"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "secret",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "registry_profiles",
+            "name": "secret"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "provider",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "registry_config",
+            "name": "provider"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "auth_host",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "registry_config",
+            "name": "auth_host"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "protocol",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "registry_config",
+            "name": "protocol"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "skip_tls",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "registry_config",
+            "name": "skip_tls"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "namespace",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "registry_config",
+            "name": "namespace"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      true,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "2a13556b2131b79ff128c30df765eb4d9e2e837f410813c0f2ae3a4f48436453"
+}

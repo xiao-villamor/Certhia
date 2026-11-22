@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH added AS (\n        INSERT INTO watch_seen SELECT DISTINCT w.id,f.advisory_id FROM image_watches w JOIN findings f ON f.digest_id=$2 AND f.resolved_scan_id IS NULL\n        WHERE w.reference=$3 AND w.platform=$4 ON CONFLICT DO NOTHING RETURNING watch_id,advisory_id\n        ),alert AS(INSERT INTO watch_alerts(watch_id,scan_id,next_attempt) SELECT DISTINCT watch_id,$1::uuid,now() FROM added RETURNING id,watch_id)\n        INSERT INTO watch_alert_advisories SELECT alert.id,added.advisory_id FROM added JOIN alert USING(watch_id)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cab79723679293148220f907a6a71bec2eaf9524da8098cea54455130c411d37"
+}

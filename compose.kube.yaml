@@ -1,0 +1,6 @@
+services:
+  app:
+    environment:
+      KUBECONFIG: /etc/certhia/kubeconfig
+    volumes:
+      - ${CERTHIA_KUBECONFIG:?Set CERTHIA_KUBECONFIG to a readable kubeconfig file}:/etc/certhia/kubeconfig:ro

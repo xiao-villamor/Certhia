@@ -1,0 +1,93 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH claimed AS(UPDATE watch_alerts SET next_attempt=now()+interval '60 seconds' WHERE id=(\n        SELECT id FROM watch_alerts WHERE next_attempt<=now() ORDER BY next_attempt,id LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING *)\n        SELECT a.id,w.reference,w.platform,a.scan_id,a.next_attempt,a.attempts,ARRAY(SELECT v.external_id FROM watch_alert_advisories aa JOIN advisories v\n        ON v.id=aa.advisory_id WHERE aa.alert_id=a.id ORDER BY v.external_id) AS \"advisories!\" FROM claimed a JOIN image_watches w ON w.id=a.watch_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "watch_alerts",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "reference",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_watches",
+            "name": "reference"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "platform",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_watches",
+            "name": "platform"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "scan_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "watch_alerts",
+            "name": "scan_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "next_attempt",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "watch_alerts",
+            "name": "next_attempt"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "attempts",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "watch_alerts",
+            "name": "attempts"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "advisories!",
+        "type_info": "TextArray",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      null
+    ]
+  },
+  "hash": "736591158eaf3856025ab0c799b3b0e48e5a70efa0d7c220f8dc4904447c34ce"
+}

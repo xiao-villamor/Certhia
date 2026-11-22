@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT finish_scan($1,$2,$3,NULL)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "finish_scan",
+        "type_info": "Void",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "609c5bc054a8dacd153b93af3c855c0d3dffcf1fc7d44625980ccd4e75ee8f32"
+}

@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE scan_directory SET observed_order=nextval('observation_order') WHERE id=$1 RETURNING scan_no",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "scan_no",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "scan_directory",
+            "name": "scan_no"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "14bbd0c5a42f053a0754fa6299a4f77c98d44899720f6ef474500af771013848"
+}

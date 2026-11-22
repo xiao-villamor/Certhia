@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO digests(digest,os,arch,size) VALUES($1,$2,$3,$4)\n                 ON CONFLICT(digest) DO UPDATE SET\n                    os=coalesce(digests.os,excluded.os), size=coalesce(digests.size,excluded.size)\n                 RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "digests",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a866f13faa20669d78134febd9276d365c7097b4fa83742ed38ce1c6af648645"
+}

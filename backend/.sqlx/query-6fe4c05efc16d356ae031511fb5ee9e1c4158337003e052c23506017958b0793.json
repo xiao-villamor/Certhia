@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH new_registry AS (\n                    INSERT INTO registries(id,host,name) VALUES($1,$2,$2)\n                    ON CONFLICT(host) DO NOTHING RETURNING id\n                ) SELECT id AS \"id!\" FROM new_registry UNION ALL SELECT id FROM registries WHERE host=$2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Uuid",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "6fe4c05efc16d356ae031511fb5ee9e1c4158337003e052c23506017958b0793"
+}

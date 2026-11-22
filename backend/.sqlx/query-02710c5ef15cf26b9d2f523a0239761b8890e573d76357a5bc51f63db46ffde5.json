@@ -1,0 +1,234 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT a.id AS aid,f.digest_id,p.id AS pid,rd.repository_id,a.external_id AS id,e.name AS ecosystem,p.name AS package,p.version AS installed,p.purl,\n        coalesce(v.version,'') AS \"fixed!\",upper(sev.name) AS \"severity!\",coalesce(a.summary,'') AS \"title!\",\n        s.reference,s.platform,s.finished_at,s.id AS scan,d.digest,coalesce(t.status,'open') AS \"status!\",\n        CASE WHEN t.tracker IS NOT NULL THEN jsonb_strip_nulls(jsonb_build_object('tracker',t.tracker,'trackerId',t.tracker_id,'url',t.issue_url,'key',t.issue_key)) END AS issue\n        FROM findings f JOIN advisories a ON a.id=f.advisory_id JOIN packages p ON p.id=f.package_id JOIN ecosystems e ON e.id=p.ecosystem_id\n        JOIN severities sev ON sev.id=a.severity_id LEFT JOIN fix_versions v ON v.id=f.fixed_in\n        JOIN repository_digests rd USING(digest_id) JOIN digests d ON d.id=f.digest_id\n        JOIN LATERAL (\n          SELECT DISTINCT ON (s.reference,s.platform) s.reference,s.platform,s.finished_at,s.id,sd.observed_order\n          FROM scans s JOIN scan_directory sd USING(id,queued_at)\n          WHERE s.repository_id=rd.repository_id AND s.digest_id=f.digest_id AND s.status='completed'\n          AND ($14::boolean IS DISTINCT FROM true OR position('@' in s.reference)>0 OR s.reference LIKE 'sha256:%' OR EXISTS (\n            SELECT FROM image_tags tag WHERE tag.repository_id=rd.repository_id AND tag.platform=s.platform\n              AND tag.tag=substring(s.reference from '[^:]+$') AND tag.digest_id=f.digest_id))\n          ORDER BY s.reference,s.platform,s.finished_at DESC NULLS LAST,s.id DESC\n        )s ON true\n        LEFT JOIN image_finding_tracking t ON (t.repository_id,t.digest_id,t.reference,t.platform,t.advisory_id)\n            =(rd.repository_id,f.digest_id,s.reference,s.platform,f.advisory_id)\n        WHERE f.resolved_scan_id IS NULL AND ($1::text IS NULL OR p.name=$1) AND ($2::text IS NULL OR a.external_id=$2)\n        AND EXISTS (SELECT FROM scan_finding_keys(f.digest_id,s.observed_order) k\n            WHERE k.advisory_id=f.advisory_id AND k.package_id=f.package_id)\n        AND ($8::text IS NULL OR a.external_id ILIKE '%'||$8||'%' OR a.summary ILIKE '%'||$8||'%' OR p.name ILIKE '%'||$8||'%'\n            OR t.issue_key ILIKE '%'||$8||'%' OR s.reference ILIKE '%'||$8||'%')\n        AND ($9::text IS NULL OR sev.name=lower($9)) AND ($10::text IS NULL OR coalesce(t.status,'open')=$10)\n        AND (coalesce($11,false)=false OR t.issue_url IS NOT NULL) AND ($12::text IS NULL OR e.name=ANY(string_to_array($12,',')))\n        AND ($13::boolean IS NULL OR (f.fixed_in IS NOT NULL)=$13)\n        AND (f.advisory_id,f.digest_id,f.package_id,rd.repository_id)>=($3,$4,$5,$6)\n        AND (f.advisory_id,f.digest_id,f.package_id,rd.repository_id,s.reference,s.platform)>($3,$4,$5,$6,$15::text,$16::text)\n        ORDER BY f.advisory_id,f.digest_id,f.package_id,rd.repository_id,s.reference,s.platform LIMIT $7",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "aid",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "advisories",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "digest_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "findings",
+            "name": "digest_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "pid",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "packages",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "repository_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "repository_digests",
+            "name": "repository_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "advisories",
+            "name": "external_id"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "ecosystem",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "ecosystems",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "package",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "packages",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "installed",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "packages",
+            "name": "version"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "purl",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "packages",
+            "name": "purl"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "fixed!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 10,
+        "name": "severity!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 11,
+        "name": "title!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 12,
+        "name": "reference",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "scans",
+            "name": "reference"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "platform",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "scans",
+            "name": "platform"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "finished_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "scans",
+            "name": "finished_at"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "scan",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "scans",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "digest",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "digests",
+            "name": "digest"
+          }
+        }
+      },
+      {
+        "ordinal": 17,
+        "name": "status!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 18,
+        "name": "issue",
+        "type_info": "Jsonb",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int4",
+        "Int8",
+        "Int4",
+        "Int8",
+        "Int8",
+        "Text",
+        "Text",
+        "Text",
+        "Bool",
+        "Text",
+        "Bool",
+        "Bool",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      null,
+      null,
+      null,
+      false,
+      false,
+      true,
+      false,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "02710c5ef15cf26b9d2f523a0239761b8890e573d76357a5bc51f63db46ffde5"
+}

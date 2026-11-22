@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE watch_alerts SET delivered_at=now(),next_attempt=NULL,error=NULL WHERE id=$1 AND next_attempt=$2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6f1689b21c4e818c59f6259c665823f4349db9a9e7de09ccc2293861a8d17e70"
+}

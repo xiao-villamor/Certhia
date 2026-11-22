@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM registry_catalog_entries WHERE registry_id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "613c8d5ea9267abc44f4ae7d98d074a2c46996855c8afb25402db62cfd9789b2"
+}

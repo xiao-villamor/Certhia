@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO watch_seen SELECT DISTINCT $1::uuid,k.advisory_id FROM (SELECT digest_id,observed_order FROM scans JOIN scan_directory USING(id,queued_at)\n            WHERE reference=$2 AND platform=$3 AND status='completed' ORDER BY observed_order DESC LIMIT 1) d CROSS JOIN LATERAL scan_finding_keys(d.digest_id,d.observed_order) k",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "98c3be594eaeb86bf44dbde19e7d5338acdd36b3510ff41cc911eba3696434fd"
+}

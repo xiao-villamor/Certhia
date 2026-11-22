@@ -1,0 +1,103 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: certhia-data
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: certhia
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: certhia
+  template:
+    metadata:
+      labels:
+        app: certhia
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: digestdesk:local
+          envFrom:
+            - secretRef:
+                name: certhia-database
+          env:
+            - name: TMPDIR
+              value: /tmp
+            - name: CERTHIA_ALLOWED_HOSTS
+              value: localhost,certhia
+            - name: CERTHIA_REGISTRY_KEY_FILE
+              value: /var/run/certhia/registry.key
+          ports:
+            - name: http
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: data
+              mountPath: /data
+            - name: key
+              mountPath: /var/run/certhia
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /api/ready
+              port: http
+              httpHeaders:
+                - name: Host
+                  value: localhost
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+              httpHeaders:
+                - name: Host
+                  value: localhost
+          startupProbe:
+            httpGet:
+              path: /api/ready
+              port: http
+              httpHeaders:
+                - name: Host
+                  value: localhost
+            failureThreshold: 60
+            periodSeconds: 5
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: data
+          persistentVolumeClaim:
+            claimName: certhia-data
+        - name: key
+          secret:
+            secretName: certhia-key
+            defaultMode: 0440
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: certhia
+spec:
+  selector:
+    app: certhia
+  ports:
+    - port: 8080
+      targetPort: http

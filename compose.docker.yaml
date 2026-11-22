@@ -1,0 +1,8 @@
+services:
+  app:
+    environment:
+      CERTHIA_DOCKER_SOCKET: /var/run/docker.sock
+    group_add:
+      - "${CERTHIA_DOCKER_GID:?Set CERTHIA_DOCKER_GID to the socket group}"
+    volumes:
+      - "${CERTHIA_DOCKER_SOCKET_PATH:-/var/run/docker.sock}:/var/run/docker.sock"

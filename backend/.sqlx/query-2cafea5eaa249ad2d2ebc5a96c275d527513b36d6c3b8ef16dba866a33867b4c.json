@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO artifact_refs(scan_id,kind,object_key,owned) SELECT $1,kind,ref,true\n                FROM unnest($2::text[],$3::text[]) AS refs(kind,ref)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "TextArray",
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2cafea5eaa249ad2d2ebc5a96c275d527513b36d6c3b8ef16dba866a33867b4c"
+}

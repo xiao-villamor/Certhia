@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE scans SET status='cancelled',error=$3,finished_at=now() WHERE id=$1 AND queued_at=$2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "58722d24cb41d5814abc3da078c40abfee3f8adc4ddd7a4c4e2de90d1e0dd7ce"
+}

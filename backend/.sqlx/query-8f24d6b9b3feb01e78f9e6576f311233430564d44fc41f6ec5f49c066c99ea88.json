@@ -1,0 +1,71 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT e.name AS ecosystem,p.name,p.version,p.purl,nullif(dp.layer_index,-1) AS layer_index FROM digest_packages dp\n            JOIN packages p ON p.id=dp.package_id JOIN ecosystems e ON e.id=p.ecosystem_id WHERE dp.digest_id=$1\n            ORDER BY ecosystem,p.name,p.version",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ecosystem",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "ecosystems",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "packages",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "version",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "packages",
+            "name": "version"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "purl",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "packages",
+            "name": "purl"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "layer_index",
+        "type_info": "Int4",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "8f24d6b9b3feb01e78f9e6576f311233430564d44fc41f6ec5f49c066c99ea88"
+}

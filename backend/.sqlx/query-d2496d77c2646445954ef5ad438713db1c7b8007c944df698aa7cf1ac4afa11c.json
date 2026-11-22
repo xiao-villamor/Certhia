@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT jsonb_build_object('id',h.id,'name',h.name,'scanId',r.scan_id,'createdAt',h.created_at,'trigger',h.trigger,\n        'status',CASE WHEN r.scan_id IS NULL THEN 'no_matches' ELSE coalesce(s.status,'removed') END) AS \"entry!\"\n        FROM schedule_runs h LEFT JOIN schedule_run_scans r ON r.run_id=h.id LEFT JOIN scan_directory d ON d.id=r.scan_id LEFT JOIN scans s ON s.id=d.id AND s.queued_at=d.queued_at\n        WHERE ($1::uuid IS NULL OR (h.id,coalesce(r.scan_id,'00000000-0000-0000-0000-000000000000'))<($1,$2))\n        AND ($3::uuid IS NULL OR h.id=$3) ORDER BY h.id DESC,r.scan_id DESC LIMIT $4",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "entry!",
+        "type_info": "Jsonb",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "d2496d77c2646445954ef5ad438713db1c7b8007c944df698aa7cf1ac4afa11c"
+}

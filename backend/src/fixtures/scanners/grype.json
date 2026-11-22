@@ -1,0 +1,10 @@
+{
+  "distro": {"name": "alpine", "version": "3.22"},
+  "matches": [{
+    "artifact": {"name": "openssl", "version": "3.5.0-r0", "type": "apk", "purl": "pkg:apk/alpine/openssl@3.5.0-r0"},
+    "vulnerability": {
+      "id": "CVE-2099-0001", "description": "Example advisory", "severity": "High",
+      "fix": {"versions": ["3.5.1-r0"], "state": "fixed"}
+    }
+  }]
+}

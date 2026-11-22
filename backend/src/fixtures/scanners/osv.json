@@ -1,0 +1,16 @@
+{
+  "results": [{
+    "source": {"path": "image.tar", "type": "docker"},
+    "packages": [{
+      "package": {"name": "example", "version": "1.0.0", "ecosystem": "npm", "purl": "pkg:npm/example@1.0.0"},
+      "groups": [{"ids": ["GHSA-fixture"], "aliases": ["CVE-2099-0002", "GHSA-fixture"], "max_severity": "9.8"}],
+      "vulnerabilities": [{
+        "id": "GHSA-fixture", "summary": "Example dependency advisory",
+        "affected": [
+          {"package": {"name": "example", "ecosystem": "npm"}, "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "1.1.0"}]}]},
+          {"package": {"name": "unrelated", "ecosystem": "npm"}, "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "3.0.0"}]}]}
+        ]
+      }]
+    }]
+  }]
+}

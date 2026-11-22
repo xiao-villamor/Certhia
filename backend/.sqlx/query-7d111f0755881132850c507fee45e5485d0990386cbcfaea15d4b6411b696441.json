@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM batches WHERE created_at<now()-$1::integer * interval '1 day'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7d111f0755881132850c507fee45e5485d0990386cbcfaea15d4b6411b696441"
+}

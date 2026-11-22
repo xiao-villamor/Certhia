@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM settings WHERE key='scan_engines'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "3f19e0dca4e0cfa0897d9f45178f02fda5009520622ba06c5a674e1972da0a7f"
+}

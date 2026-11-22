@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH new_repo AS (\n                    INSERT INTO repositories(registry_id,name) VALUES($1,$2)\n                    ON CONFLICT(registry_id,name) DO NOTHING RETURNING id\n                ) SELECT id AS \"id!\" FROM new_repo UNION ALL\n                    SELECT id FROM repositories WHERE registry_id=$1 AND name=$2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "8585c96d2430563895a29700d17071655f5466f7148ee727ae988d9bfeb9527f"
+}

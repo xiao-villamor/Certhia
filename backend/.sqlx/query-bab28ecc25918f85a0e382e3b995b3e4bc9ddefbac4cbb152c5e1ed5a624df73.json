@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT s.scanners FROM scans s JOIN scan_directory d USING(id,queued_at) WHERE d.id=$1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "scanners",
+        "type_info": "TextArray",
+        "origin": {
+          "Table": {
+            "table": "scans",
+            "name": "scanners"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "bab28ecc25918f85a0e382e3b995b3e4bc9ddefbac4cbb152c5e1ed5a624df73"
+}

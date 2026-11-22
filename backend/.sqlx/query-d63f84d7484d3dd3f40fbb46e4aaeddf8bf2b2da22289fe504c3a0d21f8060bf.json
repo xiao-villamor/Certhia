@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM artifact_refs a USING scan_directory d WHERE d.id=a.scan_id AND NOT EXISTS(SELECT FROM scans WHERE (id,queued_at)=(d.id,d.queued_at))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "d63f84d7484d3dd3f40fbb46e4aaeddf8bf2b2da22289fe504c3a0d21f8060bf"
+}

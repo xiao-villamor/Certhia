@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT rc.registry_id FROM registry_config rc LEFT JOIN registry_catalog c USING(registry_id)\n        WHERE rc.auto_sync AND (c.refreshed_at IS NULL OR c.refreshed_at < now()-interval '15 minutes')\n        ORDER BY c.refreshed_at NULLS FIRST,rc.registry_id LIMIT 5",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "registry_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "registry_config",
+            "name": "registry_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a774f3f71cdcbdf4ac6dccc1339ec5b6ed10653bf7fda4f213df2f559edf3d44"
+}

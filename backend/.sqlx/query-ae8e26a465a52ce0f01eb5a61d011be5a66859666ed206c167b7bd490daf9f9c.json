@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM schedule_runs WHERE created_at<now()-$1::integer * interval '1 day'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ae8e26a465a52ce0f01eb5a61d011be5a66859666ed206c167b7bd490daf9f9c"
+}

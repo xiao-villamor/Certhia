@@ -1,0 +1,43 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH names AS(SELECT DISTINCT p.name FROM package_counts c JOIN packages p ON p.id=c.package_id\n        WHERE c.total>0 AND p.name>coalesce($1,'') ORDER BY p.name LIMIT $2)\n        SELECT p.name,upper(s.name) AS \"severity!\",count(DISTINCT f.advisory_id) AS \"total!\" FROM names JOIN packages p USING(name)\n        JOIN findings f ON f.package_id=p.id AND f.resolved_scan_id IS NULL JOIN advisories a ON a.id=f.advisory_id JOIN severities s ON s.id=a.severity_id\n        GROUP BY p.name,s.name ORDER BY p.name",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "packages",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "severity!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "total!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "746e655f4ade25ba0f6a98ebba94eae61705be9a3ca615723fef22100e7cd149"
+}

@@ -1,0 +1,8 @@
+{
+  "summary": {"fatal": 1, "warn": 1, "pass": 1},
+  "details": [
+    {"code": "CIS-DI-0001", "title": "Create a user for the container", "level": "WARN", "alerts": ["Last user should not be root"]},
+    {"code": "CIS-DI-0010", "title": "Do not store credentials in images", "level": "FATAL", "alerts": ["fixture-secret"]},
+    {"code": "DKL-DI-0006", "title": "Avoid Latest tag", "level": "PASS", "alerts": []}
+  ]
+}

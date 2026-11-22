@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO registry_catalog(registry_id,refreshed_at,error) VALUES($1,$2,$3)\n        ON CONFLICT(registry_id) DO UPDATE SET refreshed_at=excluded.refreshed_at,error=excluded.error",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "82651a5c5e3c03d0e7d7a31483efb6f8290aa0125213cf1f62bae6d98599bbed"
+}

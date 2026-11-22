@@ -1,0 +1,88 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT d.id,d.digest,d.os,d.size,s.inventory_available,sd.observed_order\n            FROM scan_directory sd JOIN scans s USING(id,queued_at) JOIN digests d ON d.id=s.digest_id WHERE sd.id=$1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "digests",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "digest",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "digests",
+            "name": "digest"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "os",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "digests",
+            "name": "os"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "size",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "digests",
+            "name": "size"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "inventory_available",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "scans",
+            "name": "inventory_available"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "observed_order",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "scan_directory",
+            "name": "observed_order"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "509882bc9fbd30356c7125bcff99fddf8d36e8dee0e986f805eecd719208cf62"
+}

@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT jsonb_build_object('finding',a.external_id,'status',t.status,'note',t.note,'updatedAt',t.updated_at,\n        'issue',CASE WHEN t.tracker IS NOT NULL THEN jsonb_strip_nulls(jsonb_build_object('tracker',t.tracker,'trackerId',t.tracker_id,'url',t.issue_url,'key',t.issue_key)) END) AS \"entry!\"\n        FROM scan_directory d JOIN scans s USING(id,queued_at)\n        JOIN image_finding_tracking t USING(repository_id,digest_id,reference,platform)\n        JOIN advisories a ON a.id=t.advisory_id\n        WHERE d.id=$1 AND a.external_id>coalesce($2,'') AND ($4::text IS NULL OR a.external_id=$4)\n        ORDER BY a.external_id LIMIT $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "entry!",
+        "type_info": "Jsonb",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "5d2cc131b754f23b52634ea2960b31d07dc5becf97d492fc7cd0d3d96c3355cb"
+}

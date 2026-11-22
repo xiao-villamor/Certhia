@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH baseline AS(SELECT package_id,advisory_id FROM findings WHERE digest_id=$1 AND resolved_scan_id IS NULL),\n        target AS(SELECT package_id,advisory_id FROM findings WHERE digest_id=$2 AND resolved_scan_id IS NULL)\n        SELECT package_id AS \"package!\",advisory_id AS \"advisory!\",(baseline.package_id IS NULL) AS \"added!\" FROM baseline FULL JOIN target USING(package_id,advisory_id)\n        WHERE (baseline.package_id IS NULL OR target.package_id IS NULL) AND (package_id,advisory_id)>($3,$4)\n        ORDER BY package_id,advisory_id LIMIT $5",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "package!",
+        "type_info": "Int4",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "advisory!",
+        "type_info": "Int4",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "added!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int4",
+        "Int4",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "a79fc031cdb4a13be3b04a1db1bbf1a4005f7aa8aec4b305e3758974cb9b68ec"
+}

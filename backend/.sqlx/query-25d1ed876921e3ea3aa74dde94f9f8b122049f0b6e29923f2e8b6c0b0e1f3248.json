@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE advisories a SET description=coalesce(m.description,a.description),refs=coalesce(m.refs,a.refs),\n                    published_at=coalesce(m.published_at,a.published_at),modified_at=coalesce(m.modified_at,a.modified_at),\n                    cvss_score=coalesce(m.cvss_score,a.cvss_score),cvss_vector=coalesce(m.cvss_vector,a.cvss_vector),\n                    epss=coalesce(m.epss,a.epss),kev=coalesce(m.kev,a.kev)\n                    FROM jsonb_to_recordset($1) m(id text,description text,refs jsonb,published_at timestamptz,modified_at timestamptz,\n                    cvss_score real,cvss_vector text,epss real,kev boolean) WHERE a.external_id=m.id AND a.source='trivy'\n                    AND (a.modified_at IS NULL OR m.modified_at>=a.modified_at) AND\n                    (a.description,a.refs,a.published_at,a.modified_at,a.cvss_score,a.cvss_vector,a.epss,a.kev) IS DISTINCT FROM\n                    (coalesce(m.description,a.description),coalesce(m.refs,a.refs),coalesce(m.published_at,a.published_at),coalesce(m.modified_at,a.modified_at),\n                    coalesce(m.cvss_score,a.cvss_score),coalesce(m.cvss_vector,a.cvss_vector),coalesce(m.epss,a.epss),coalesce(m.kev,a.kev))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "25d1ed876921e3ea3aa74dde94f9f8b122049f0b6e29923f2e8b6c0b0e1f3248"
+}

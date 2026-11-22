@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT record_scan_progress($1,$2,$3,$4,$5,$6)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "record_scan_progress",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "fdd7ded4ec51c849ce4d68b38beb75234b2394c573e18466cbc2f1e856720ec9"
+}

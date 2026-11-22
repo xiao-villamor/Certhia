@@ -1,0 +1,77 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT s.reference,s.platform,s.repository_id AS \"repository!\",s.digest_id AS \"digest!\",a.id AS advisory\n        FROM scan_directory d JOIN scans s USING(id,queued_at)\n        JOIN LATERAL scan_finding_keys(s.digest_id,d.observed_order) k ON true JOIN advisories a ON a.id=k.advisory_id\n        WHERE d.id=$1 AND a.external_id=$2 LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "reference",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "scans",
+            "name": "reference"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "platform",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "scans",
+            "name": "platform"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "repository!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "scans",
+            "name": "repository_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "digest!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "scans",
+            "name": "digest_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "advisory",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "advisories",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "85cbf2ea0d143e7a2a575502ff762845396337019c5c80a73f113ce2d0fdd379"
+}

@@ -1,0 +1,64 @@
+[package]
+name = "digestdesk"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+
+[features]
+otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
+
+[dependencies]
+opentelemetry = { version = "0.33.1", optional = true, default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.33.1", optional = true, default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.33.1", optional = true, default-features = false, features = ["trace","http-proto","reqwest-blocking-client","reqwest-rustls"] }
+tracing-opentelemetry = { version = "0.34.0", optional = true, default-features = false }
+
+aes-gcm = "0.11.1"
+anyhow = "1"
+argon2 = "0.5.3"
+openidconnect = { version = "4", default-features = false, features = ["reqwest", "rustls-tls", "timing-resistant-secret-traits"] }
+axum = "0.8.9"
+base64 = "0.23.1"
+chrono = { version = "0.4", features = ["serde"] }
+cron = "0.17.0"
+futures-util = "0.3.34"
+pdf-writer = "0.15.0"
+regex = "1"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "json", "stream", "form", "query"] }
+ring = "0.17.14"
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+rust_xlsxwriter = "0.103.0"
+rusty-s3 = "0.12.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11.1"
+sqlx = { version = "0.9.1", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls-ring-native-roots", "uuid", "chrono", "json", "macros", "migrate"] }
+subtle = "2.6.1"
+tar = { version = "0.4.46", default-features = false }
+tempfile = "3"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { version = "0.7.20", features = ["io"] }
+tower = "0.5.3"
+tower-http = { version = "0.7.1", features = ["fs", "request-id", "trace", "timeout", "compression-zstd", "compression-br", "compression-gzip"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter","json"] }
+thiserror = "2.0.21"
+url = "2"
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+zstd = "0.14.4"
+zip = { version = "9.8.1", default-features = false, features = ["deflate"] }
+png = { version = "0.18", default-features = false }
+jpeg-decoder = { version = "0.3", default-features = false }
+flate2 = "1"
+
+[profile.release]
+strip = "symbols"
+
+[dev-dependencies]
+testcontainers = "0.28.0"
+divan = "0.1.21"
+
+[[bench]]
+name = "storage"
+harness = false

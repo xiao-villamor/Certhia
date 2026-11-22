@@ -1,0 +1,8 @@
+services:
+  app:
+    build:
+      target: integrations
+    environment:
+      CERTHIA_BUILDKIT_ADDR: ${CERTHIA_BUILDKIT_ADDR:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

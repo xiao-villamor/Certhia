@@ -1,0 +1,98 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT a.external_id AS id,e.name AS ecosystem,p.name AS package,p.version AS installed,p.purl,\n            coalesce(v.version,'') AS \"fixed!\",upper(s.name) AS \"severity!\",coalesce(a.summary,'') AS \"title!\"\n            FROM scan_finding_keys($1,$2) k JOIN packages p ON p.id=k.package_id JOIN ecosystems e ON e.id=p.ecosystem_id\n            JOIN advisories a ON a.id=k.advisory_id JOIN severities s ON s.id=a.severity_id\n            JOIN findings f ON f.digest_id=$1 AND f.package_id=k.package_id AND f.advisory_id=k.advisory_id\n            LEFT JOIN fix_versions v ON v.id=f.fixed_in ORDER BY a.external_id,p.name",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "advisories",
+            "name": "external_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "ecosystem",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "ecosystems",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "package",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "packages",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "installed",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "packages",
+            "name": "version"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "purl",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "packages",
+            "name": "purl"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "fixed!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 6,
+        "name": "severity!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 7,
+        "name": "title!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "12a6224d913696ceeb94e30940aa6aa081d4ade239bcda9b4342eefe3fb081dd"
+}

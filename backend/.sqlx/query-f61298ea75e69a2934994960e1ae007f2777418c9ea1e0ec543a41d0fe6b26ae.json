@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO scan_checks(scan_id,ordinal,category,external_id,target,severity,title,detail)\n                SELECT $1,(n-1)::integer,j->>'category',j->>'id',j->>'target',j->>'severity',j->>'title',j->>'detail'\n                FROM jsonb_array_elements($2) WITH ORDINALITY AS checks(j,n)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f61298ea75e69a2934994960e1ae007f2777418c9ea1e0ec543a41d0fe6b26ae"
+}

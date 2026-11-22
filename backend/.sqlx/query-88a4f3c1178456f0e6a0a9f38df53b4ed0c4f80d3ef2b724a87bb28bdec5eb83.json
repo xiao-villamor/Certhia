@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM watch_alerts WHERE next_attempt IS NULL AND created_at<now()-$1::integer * interval '1 day'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "88a4f3c1178456f0e6a0a9f38df53b4ed0c4f80d3ef2b724a87bb28bdec5eb83"
+}

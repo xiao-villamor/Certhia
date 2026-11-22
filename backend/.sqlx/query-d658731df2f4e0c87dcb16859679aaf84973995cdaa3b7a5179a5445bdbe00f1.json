@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT s.id FROM scans s LEFT JOIN digests d ON d.id=s.digest_id\n            LEFT JOIN repositories r ON r.id=s.repository_id LEFT JOIN registries g ON g.id=r.registry_id\n            WHERE platform=$1 AND ((reference=$2 AND status IN ('queued','running')) OR\n            (status='completed' AND d.digest=$3 AND g.host||'/'||r.name=$4))\n            ORDER BY (status='completed') DESC,queued_at DESC,id DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "scans",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d658731df2f4e0c87dcb16859679aaf84973995cdaa3b7a5179a5445bdbe00f1"
+}

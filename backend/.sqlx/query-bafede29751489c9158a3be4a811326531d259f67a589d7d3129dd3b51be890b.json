@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO audit_events(action,resource,detail) VALUES('scan.webhook.queued',$1,$2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bafede29751489c9158a3be4a811326531d259f67a589d7d3129dd3b51be890b"
+}

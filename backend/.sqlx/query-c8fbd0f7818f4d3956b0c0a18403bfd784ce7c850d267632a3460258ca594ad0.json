@@ -1,0 +1,68 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT rd.digest_id,f.package_id,f.advisory_id,f.fixed_in FROM repository_digests rd CROSS JOIN LATERAL (\n        SELECT package_id,advisory_id,fixed_in FROM findings WHERE digest_id=rd.digest_id AND resolved_scan_id IS NULL\n        AND (digest_id,package_id,advisory_id)>($2,$3,$4) ORDER BY package_id,advisory_id LIMIT $5)f\n        WHERE rd.repository_id=$1 AND rd.digest_id>=$2 ORDER BY rd.digest_id,f.package_id,f.advisory_id LIMIT $5",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "digest_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "repository_digests",
+            "name": "digest_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "package_id",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "findings",
+            "name": "package_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "advisory_id",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "findings",
+            "name": "advisory_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "fixed_in",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "findings",
+            "name": "fixed_in"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int4",
+        "Int4",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "c8fbd0f7818f4d3956b0c0a18403bfd784ce7c850d267632a3460258ca594ad0"
+}

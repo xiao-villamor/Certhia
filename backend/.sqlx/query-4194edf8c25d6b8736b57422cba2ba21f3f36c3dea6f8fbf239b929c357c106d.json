@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT repository FROM registry_catalog_entries WHERE registry_id=$1\n        AND repository>$2 AND strpos(lower(repository),lower($3))>0 ORDER BY repository LIMIT $4",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "repository",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "registry_catalog_entries",
+            "name": "repository"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4194edf8c25d6b8736b57422cba2ba21f3f36c3dea6f8fbf239b929c357c106d"
+}

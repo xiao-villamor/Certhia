@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT kind AS \"kind!\" FROM artifact_refs WHERE scan_id=$1 UNION SELECT 'trivy' FROM scans s JOIN scan_directory d USING(id,queued_at) WHERE d.id=$1 AND s.raw_report_ref IS NOT NULL ORDER BY 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "kind!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "aa501e733d95cec1df3fe592cbbddec58905eb0f554f0c4f0222ffa91247c34a"
+}

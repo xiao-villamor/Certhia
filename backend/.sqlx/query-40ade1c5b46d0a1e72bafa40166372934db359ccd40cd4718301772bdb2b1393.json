@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM scans s USING scan_directory d WHERE d.id=$1 AND s.id=d.id AND s.queued_at=d.queued_at AND s.status NOT IN ('queued','running')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "40ade1c5b46d0a1e72bafa40166372934db359ccd40cd4718301772bdb2b1393"
+}

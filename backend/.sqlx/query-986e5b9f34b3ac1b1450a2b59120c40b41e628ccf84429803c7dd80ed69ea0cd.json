@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM stored_blobs WHERE object_key=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "986e5b9f34b3ac1b1450a2b59120c40b41e628ccf84429803c7dd80ed69ea0cd"
+}

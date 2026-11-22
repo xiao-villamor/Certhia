@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+data/
+target/
+node_modules/
+.svelte-kit/
+build/
+
+# Local assistant settings, design audit records, and session state.
+.agents/
+.claude/
+.codex/
+.impeccable/

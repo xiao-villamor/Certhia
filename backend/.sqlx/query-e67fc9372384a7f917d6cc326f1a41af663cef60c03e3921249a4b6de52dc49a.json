@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT fire_schedule($1,$2,$3,$4) AS \"fired!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "fired!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz",
+        "Timestamptz",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "e67fc9372384a7f917d6cc326f1a41af663cef60c03e3921249a4b6de52dc49a"
+}

@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT w.created_at AS \"created_at?\" FROM registry_profiles p LEFT JOIN registry_webhooks w\n        ON p.id=w.registry_id WHERE p.id=$1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "created_at?",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "registry_webhooks",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "b885b4e1431dbb61922b654b632730be629f483bb3c0d11c28cd8e2b83afe4b3"
+}

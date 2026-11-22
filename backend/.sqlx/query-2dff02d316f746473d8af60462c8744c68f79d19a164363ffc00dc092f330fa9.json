@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO notification_config(singleton,secret) VALUES(true,$1)\n                     ON CONFLICT(singleton) DO UPDATE SET secret=excluded.secret",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2dff02d316f746473d8af60462c8744c68f79d19a164363ffc00dc092f330fa9"
+}

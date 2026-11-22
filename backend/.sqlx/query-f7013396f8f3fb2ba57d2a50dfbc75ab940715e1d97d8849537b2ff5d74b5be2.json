@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO image_tags(repository_id,tag,platform,digest_id,updated_at) VALUES($1,$2,$3,$4,$5)\n                     ON CONFLICT(repository_id,tag,platform) DO UPDATE SET digest_id=excluded.digest_id,updated_at=excluded.updated_at\n                     WHERE image_tags.updated_at<=excluded.updated_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f7013396f8f3fb2ba57d2a50dfbc75ab940715e1d97d8849537b2ff5d74b5be2"
+}

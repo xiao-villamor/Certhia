@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM registry_webhooks WHERE registry_id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0487f1b77f885123842383f558326ad1bd3bc9384f8fb8b85fc7fb92e7ff9cac"
+}

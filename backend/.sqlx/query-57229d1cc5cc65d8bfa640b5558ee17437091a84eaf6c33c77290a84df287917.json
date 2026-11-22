@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO image_finding_tracking AS existing\n        (repository_id,digest_id,reference,platform,advisory_id,status,note,updated_at,tracker_id,tracker,issue_url,issue_key)\n        VALUES($1,$2,$3,$4,$5,$6,$7,now(),$8,$9,$10,$11)\n        ON CONFLICT(repository_id,digest_id,reference,platform,advisory_id) DO UPDATE SET\n            status=excluded.status,note=excluded.note,updated_at=excluded.updated_at,\n            tracker_id=CASE WHEN $12 THEN excluded.tracker_id ELSE existing.tracker_id END,\n            tracker=CASE WHEN $12 THEN excluded.tracker ELSE existing.tracker END,\n            issue_url=CASE WHEN $12 THEN excluded.issue_url ELSE existing.issue_url END,\n            issue_key=CASE WHEN $12 THEN excluded.issue_key ELSE existing.issue_key END",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text",
+        "Text",
+        "Int4",
+        "Text",
+        "Text",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "57229d1cc5cc65d8bfa640b5558ee17437091a84eaf6c33c77290a84df287917"
+}

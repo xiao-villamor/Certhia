@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO scans(id,queued_at,reference,platform,status,finished_at)\n                    VALUES($1,$2,$3,$4,'completed',now())",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f29b74a9a3896b9cba6b78f910fb076c623d7f4b6ecfa729d5beebe89e0cd5db"
+}

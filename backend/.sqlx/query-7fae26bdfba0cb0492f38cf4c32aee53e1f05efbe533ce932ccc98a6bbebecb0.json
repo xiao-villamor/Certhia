@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO vex_reviews VALUES($1,$2,$3,$4,now()) ON CONFLICT(scan_id,advisory_id) DO UPDATE SET status=excluded.status,note=excluded.note,reviewed_at=now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7fae26bdfba0cb0492f38cf4c32aee53e1f05efbe533ce932ccc98a6bbebecb0"
+}
