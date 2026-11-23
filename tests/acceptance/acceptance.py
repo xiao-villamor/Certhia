@@ -739,6 +739,8 @@ def main():
             else:
                 raise RuntimeError('The test API did not become ready')
             api.call('/auth/login', {'email': email, 'password': password})
+            subprocess.run(['node', str(HERE / 'workspace-sso.cjs'), api.origin],
+                env={**os.environ, 'CERTHIA_TEST_EMAIL':email, 'CERTHIA_TEST_PASSWORD':password}, check=True)
             test_discovery(api, docker_fixture, tmp, database_container)
             test_sbom(api, bindir)
             test_registries(api, gitea)

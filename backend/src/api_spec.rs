@@ -53,6 +53,8 @@ pub fn document() -> Value {
             "Authentication",
             "Complete an OpenID Connect sign-in",
         ),
+        ("/settings/sso", "get", "Authentication", "Read workspace single sign-on settings and redirect URI"),
+        ("/settings/sso", "put", "Authentication", "Save workspace single sign-on settings"),
         ("/users", "get", "Users", "List workspace users"),
         ("/users", "post", "Users", "Create a workspace user"),
         (
@@ -741,7 +743,7 @@ pub fn document() -> Value {
             }
             _ => {}
         }
-        if path.starts_with("/auth/") || path.starts_with("/users") {
+        if path.starts_with("/auth/") || path.starts_with("/users") || path == "/settings/sso" {
             describe_auth(path, method, &mut operation);
         }
         if method != "get" && matches!(access, Access::Session(_) | Access::PublicMutation) {
@@ -780,6 +782,10 @@ fn describe_auth(path: &str, method: &str, operation: &mut Value) {
     let password = json!({"type":"string","format":"password","minLength":12});
     let role = json!({"type":"string","enum":["viewer","operator","admin"]});
     let user = json!({"$ref":"#/components/schemas/User"});
+    let sso_settings = json!({"type":"object","required":["name","issuer","clientId","allowedDomains","enabled","jit","trustEmail","secretPost"],
+        "properties":{"name":name,"issuer":{"type":"string","format":"uri"},"clientId":{"type":"string"},
+        "allowedDomains":{"type":"array","items":{"type":"string"}},"enabled":{"type":"boolean"},"jit":{"type":"boolean"},
+        "trustEmail":{"type":"boolean"},"secretPost":{"type":"boolean"}}});
     let request = match (path, method) {
         ("/auth/setup", _) => {
             json!({"type":"object","required":["email","displayName","password","setupCode"],
@@ -791,6 +797,8 @@ fn describe_auth(path: &str, method: &str, operation: &mut Value) {
             json!({"type":"object","required":["currentPassword","newPassword"],
             "properties":{"currentPassword":{"type":"string","format":"password"},"newPassword":password}})
         }
+        ("/settings/sso", "put") => json!({"type":"object","required":["settings"],
+            "properties":{"settings":sso_settings,"clientSecret":{"type":"string","format":"password","writeOnly":true}}}),
         ("/users", "post") => json!({"type":"object","required":["email","displayName","role"],
             "properties":{"email":email,"displayName":name,"role":role,"password":password},
             "description":"Omit password for an account that signs in through a provider with email linking."}),
@@ -814,6 +822,9 @@ fn describe_auth(path: &str, method: &str, operation: &mut Value) {
             json!({"type":"object","properties":{"user":user,"local":{"type":"boolean"},
             "oidcEmailLinking":{"type":"boolean"}}})
         }
+        ("/settings/sso", _) => json!({"type":"object","properties":{"settings":{"anyOf":[sso_settings,{"type":"null"}]},
+            "callbackUrl":{"type":["string","null"],"format":"uri"},"deploymentConflict":{"type":"boolean"},
+            "deploymentProviders":{"type":"array","items":{"type":"string"}}}}),
         ("/users", "get") => json!({"type":"array","items":user}),
         ("/auth/setup" | "/auth/login" | "/users" | "/users/{id}", _) => user,
         _ => Value::Null,

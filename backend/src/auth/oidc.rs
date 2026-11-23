@@ -1,8 +1,8 @@
 use super::{
     Role, User,
-    access::{client_ip, cookie_token, host, issue_session},
+    access::{client_ip, cookie_token, issue_session},
     accounts::{email, insert_user, lock_user, lock_users, name, rate_limit, user_by_email},
-    audit, forbidden, hash, random_token, secret_env, token_hash,
+    audit, forbidden, hash, random_token, secret_env, token_hash, workspace_sso,
 };
 use crate::{ApiError, ApiResult, App};
 use anyhow::{Context, Result, ensure};
@@ -64,7 +64,7 @@ type OidcClient = Client<
 struct Claims(BTreeMap<String, Value>);
 impl AdditionalClaims for Claims {}
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Provider {
     pub id: String,
@@ -93,6 +93,47 @@ pub struct Provider {
     default_role: Role,
     #[serde(default)]
     scopes: Vec<String>,
+    #[serde(skip)]
+    workspace_revision: Option<Uuid>,
+}
+
+impl Provider {
+    pub fn issuer(&self) -> &str {
+        &self.issuer
+    }
+
+    pub fn workspace(
+        settings: workspace_sso::Settings,
+        client_secret: String,
+        revision: Uuid,
+    ) -> Self {
+        Self {
+            id: workspace_sso::ID.into(),
+            name: settings.name,
+            issuer: settings.issuer,
+            client_id: settings.client_id,
+            client_secret_env: None,
+            client_secret,
+            secret_post: settings.secret_post,
+            link_by_email: true,
+            trust_email: settings.trust_email,
+            allowed_domains: settings.allowed_domains,
+            jit: settings.jit,
+            role_claim: None,
+            required_claims: BTreeMap::new(),
+            role_map: BTreeMap::new(),
+            default_role: Role::Viewer,
+            scopes: Vec::new(),
+            workspace_revision: Some(revision),
+        }
+    }
+
+    fn flow_key(&self) -> String {
+        self.workspace_revision.map_or_else(
+            || self.id.clone(),
+            |revision| format!("{}:{revision}", self.id),
+        )
+    }
 }
 
 fn viewer() -> Role {
@@ -118,12 +159,10 @@ pub fn providers() -> Result<Vec<Provider>> {
                 && ids.insert(provider.id.clone()),
             "OIDC provider IDs must be unique and contain 1–40 lowercase letters, digits, or dashes"
         );
-        let issuer = Url::parse(&provider.issuer).context("Invalid OIDC issuer URL")?;
+        parse_issuer(&provider.issuer)?;
         ensure!(
-            https_endpoint(&issuer)
-                && issuer.query().is_none()
-                && issuers.insert(provider.issuer.clone()),
-            "OIDC issuers must be unique HTTPS URLs without credentials, query, or fragment"
+            issuers.insert(provider.issuer.clone()),
+            "OIDC issuers must be unique"
         );
         name(&provider.name)?;
         ensure!(
@@ -147,9 +186,7 @@ pub fn providers() -> Result<Vec<Provider>> {
         provider.client_secret =
             secret_env(&variable)?.with_context(|| format!("Set {variable} or {variable}_FILE"))?;
         for domain in &mut provider.allowed_domains {
-            let address =
-                email(&format!("user@{domain}")).context("Invalid OIDC allowed domain")?;
-            *domain = address.split_once('@').expect("validated email").1.into();
+            *domain = normalize_domain(domain)?;
         }
         ensure!(
             !provider.jit || !provider.allowed_domains.is_empty(),
@@ -165,6 +202,20 @@ pub fn providers() -> Result<Vec<Provider>> {
         );
     }
     Ok(providers)
+}
+
+pub fn normalize_domain(domain: &str) -> Result<String> {
+    let address = email(&format!("user@{domain}")).context("Enter valid allowed email domains.")?;
+    Ok(address.split_once('@').expect("validated email").1.into())
+}
+
+pub fn parse_issuer(value: &str) -> Result<Url> {
+    let url = Url::parse(value).context("Enter a valid OIDC issuer URL.")?;
+    ensure!(
+        https_endpoint(&url) && url.query().is_none(),
+        "Use an HTTPS issuer URL without credentials, query, or fragment."
+    );
+    Ok(url)
 }
 
 fn https_endpoint(url: &Url) -> bool {
@@ -184,7 +235,7 @@ pub fn http_client() -> Result<HttpClient> {
         .build()?)
 }
 
-async fn client(app: &App, provider: &Provider) -> Result<OidcClient> {
+async fn client(app: &App, provider: &Provider, origin: &Url) -> Result<OidcClient> {
     // Rediscover on callback as well as start so a signing-key rotation during login is handled.
     let metadata = CoreProviderMetadata::discover_async(
         IssuerUrl::new(provider.issuer.clone())?,
@@ -199,13 +250,7 @@ async fn client(app: &App, provider: &Provider) -> Result<OidcClient> {
             && https_endpoint(metadata.jwks_uri().url()),
         "OIDC discovery returned invalid HTTPS endpoints"
     );
-    let redirect = app
-        .0
-        .auth
-        .origin
-        .as_ref()
-        .context("OIDC requires a public origin")?
-        .join(&format!("/api/auth/oidc/{}/callback", provider.id))?;
+    let redirect = workspace_sso::callback_url(origin, &provider.id);
     Ok(OidcClient::from_provider_metadata(
         metadata,
         ClientId::new(provider.client_id.clone()),
@@ -219,21 +264,22 @@ async fn client(app: &App, provider: &Provider) -> Result<OidcClient> {
     .set_redirect_uri(RedirectUrl::from_url(redirect)))
 }
 
-fn provider<'a>(app: &'a App, id: &str, headers: &HeaderMap) -> ApiResult<&'a Provider> {
-    let origin = app.0.auth.origin.as_ref().ok_or_else(forbidden)?;
-    let authority = host(headers).ok_or_else(forbidden)?;
-    if Url::parse(&format!("{}://{authority}/", origin.scheme()))
-        .is_ok_and(|target| target.origin() == origin.origin())
+async fn provider(app: &App, id: &str) -> ApiResult<Provider> {
+    if let Some(provider) = app
+        .0
+        .auth
+        .providers
+        .iter()
+        .find(|provider| provider.id == id)
     {
-        return app
-            .0
-            .auth
-            .providers
-            .iter()
-            .find(|provider| provider.id == id)
-            .ok_or_else(|| ApiError::missing("Sign-in provider not found."));
+        return Ok(provider.clone());
     }
-    Err(forbidden())
+    if id == workspace_sso::ID
+        && let Some(row) = workspace_sso::active(app).await?
+    {
+        return row.into_provider(app);
+    }
+    Err(ApiError::missing("Sign-in provider not found."))
 }
 
 pub async fn start(
@@ -242,7 +288,16 @@ pub async fn start(
     peer: ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
-    let provider = provider(&app, &id, &headers)?;
+    let origin = workspace_sso::origin(&app, &headers).ok_or_else(forbidden)?;
+    let provider = provider(&app, &id).await?;
+    if provider.workspace_revision.is_some()
+        && headers
+            .get(header::ORIGIN)
+            .and_then(|value| value.to_str().ok())
+            != Some(origin.origin().ascii_serialization().as_str())
+    {
+        return Err(forbidden());
+    }
     let pool = &app.0.database.primary;
     rate_limit(
         pool,
@@ -251,9 +306,9 @@ pub async fn start(
         30,
     )
     .await?;
-    let client = match client(&app, provider).await {
+    let client = match client(&app, &provider, &origin).await {
         Ok(client) => client,
-        Err(_) => return failed(&app, provider, "discovery").await,
+        Err(_) => return failed(&app, &provider, "discovery").await,
     };
     let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
     let mut request = client
@@ -273,7 +328,7 @@ pub async fn start(
     let browser_hash = token_hash(&browser).expect("generated token is canonical");
     sqlx::query("INSERT INTO auth_oidc_flows(state_hash,browser_hash,provider,verifier,nonce) VALUES($1,$2,$3,$4,$5)")
         .bind(hash(state.secret().as_bytes()).as_slice()).bind(browser_hash.as_slice())
-        .bind(&provider.id).bind(verifier.secret()).bind(nonce.secret()).execute(pool).await?;
+        .bind(provider.flow_key()).bind(verifier.secret()).bind(nonce.secret()).execute(pool).await?;
     Ok((
         [(
             header::SET_COOKIE,
@@ -298,7 +353,8 @@ pub async fn callback(
     Query(query): Query<Callback>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
-    let provider = provider(&app, &id, &headers)?;
+    let origin = workspace_sso::origin(&app, &headers).ok_or_else(forbidden)?;
+    let provider = provider(&app, &id).await?;
     let (Some(state), Some(browser_hash)) = (
         query.state,
         cookie_token(&headers, &app.0.auth.cookie_name(FLOW_COOKIE)),
@@ -310,7 +366,7 @@ pub async fn callback(
         "DELETE FROM auth_oidc_flows WHERE state_hash=$1 AND browser_hash=$2 AND provider=$3 AND expires>now()
          RETURNING verifier,nonce",
     )
-    .bind(hash(state.as_bytes()).as_slice()).bind(browser_hash.as_slice()).bind(&provider.id)
+    .bind(hash(state.as_bytes()).as_slice()).bind(browser_hash.as_slice()).bind(provider.flow_key())
     .fetch_optional(pool).await?;
     let Some((verifier, nonce)) = flow else {
         return Ok(Redirect::to("/login?error=oidc").into_response());
@@ -318,11 +374,11 @@ pub async fn callback(
     let Some(code) = query.code.filter(|_| {
         query.error.is_none() && query.iss.is_none_or(|issuer| issuer == provider.issuer)
     }) else {
-        return failed(&app, provider, "provider rejected authorization").await;
+        return failed(&app, &provider, "provider rejected authorization").await;
     };
-    let claims = match exchange(&app, provider, code, verifier, nonce).await {
+    let claims = match exchange(&app, &provider, &origin, code, verifier, nonce).await {
         Ok(claims) => claims,
-        Err(_) => return failed(&app, provider, "token exchange or validation").await,
+        Err(_) => return failed(&app, &provider, "token exchange or validation").await,
     };
     let identity = Identity {
         subject: claims.subject().as_str(),
@@ -336,9 +392,14 @@ pub async fn callback(
     };
     let mut tx = pool.begin().await?;
     lock_users(&mut tx).await?;
-    let Some(user) = resolve_user(&mut tx, provider, &identity).await? else {
+    if let Some(revision) = provider.workspace_revision
+        && !workspace_sso::revision_active(&mut tx, revision).await?
+    {
+        return Ok(Redirect::to("/login?error=oidc").into_response());
+    }
+    let Some(user) = resolve_user(&mut tx, &provider, &identity).await? else {
         tx.rollback().await?;
-        return failed(&app, provider, "account access denied").await;
+        return failed(&app, &provider, "account access denied").await;
     };
     let cookie = issue_session(
         &app,
@@ -369,11 +430,12 @@ fn completed_login(session: String, expired_flow: String) -> Response {
 async fn exchange(
     app: &App,
     provider: &Provider,
+    origin: &Url,
     code: String,
     verifier: String,
     nonce: String,
 ) -> Result<IdTokenClaims<Claims, CoreGenderClaim>> {
-    let client = client(app, provider).await?;
+    let client = client(app, provider, origin).await?;
     let response = client
         .exchange_code(AuthorizationCode::new(code))?
         .set_pkce_verifier(PkceCodeVerifier::new(verifier))
@@ -482,7 +544,13 @@ async fn resolve_user(
         return Ok(None);
     };
     let user = match user_by_email(connection, &email).await? {
-        Some(user) if provider.link_by_email && !user.disabled => user,
+        Some(user)
+            if provider.link_by_email
+                && !user.disabled
+                && (provider.workspace_revision.is_none() || !user.has_password) =>
+        {
+            user
+        }
         Some(_) => return Ok(None),
         None if provider.jit => {
             let display_name = identity

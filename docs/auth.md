@@ -17,7 +17,7 @@ Passwords need at least 8 characters and can be up to 1024 bytes. Certhia reject
 | --- | --- |
 | Viewer | Read scan reports, findings, image and patch evidence, schedules, and comparisons. |
 | Operator | Viewer access plus queue, import, rescan and cancel scans, triage findings, link issues, manage schedules and watches, use saved registry connections, and build or publish images. |
-| Admin | Operator access plus manage users, registry settings and webhook tokens, scanner and workspace preferences, activity history, and report deletion. OIDC configuration is managed through deployment settings. |
+| Admin | Operator access plus manage users, workspace single sign-on, registry settings and webhook tokens, scanner and workspace preferences, activity history, and report deletion. |
 
 Admins manage accounts in **Workspace preferences → Users**. Create a local account with an initial password and share it through a secure channel. For SSO, create an account without a password when email linking is enabled, or let the identity provider provision it. The Users section can edit roles, disable accounts, revoke sessions, and reset another local user’s password. Password recovery runs through an administrator or the server console. Keep at least one enabled administrator.
 
@@ -42,6 +42,17 @@ Set `CERTHIA_AUTH_SECURE_COOKIE=auto` when the same instance is reached over HTT
 Login attempts are limited across replicas to 10 per account and 50 per client IP per five-minute window. By default, Certhia uses the TCP peer address. Behind a proxy, that can put everyone in one rate-limit bucket. To use the actual client IP, set `CERTHIA_AUTH_TRUSTED_PROXIES` to a comma-separated list of the **immediate** proxy IP addresses. Configure those proxies to overwrite `X-Real-IP` with the validated client address and restrict direct access to Certhia. Certhia ignores the header from other peers.
 
 ## Configure an OpenID Connect provider
+
+### Configure company sign-in in the dashboard
+
+1. Set up the public HTTPS origin as described above and sign in as a workspace administrator. Open **Workspace preferences → Single sign-on**.
+2. Register the displayed **Redirect URI** for a confidential web client at your identity provider. Enable the authorization code flow with S256 PKCE.
+3. Enter the issuer URL, client ID, client secret and allowed work email domains. For Microsoft Entra ID, register a single-tenant **Web** application, use the issuer `https://login.microsoftonline.com/<tenant-id>/v2.0`, include the email claim in ID tokens, and select **Send the client secret in the token request body**. Use tenant application assignment to restrict access. [Microsoft Entra OIDC](https://learn.microsoft.com/en-us/entra/identity-platform/v2-protocols-oidc)
+4. Save and test the new sign-in button in a separate browser session. You can invite passwordless accounts by work email in **Users**, or allow first-time users from the allowed domains to join as viewers. Change their roles in **Users**. Workspace-configured OIDC links by email only to accounts without a local password. If your provider omits email verification, enable that option only for a directory that controls and verifies the asserted email. Disabling the provider blocks new OIDC sign-ins. Use **Revoke sessions** in Users to end existing sessions.
+
+The dashboard manages one company provider alongside deployment-managed providers. The client secret is encrypted with Certhia’s deployment key and is never returned by the settings API. Replicas reading the same database must use the same key. Enter a new secret when changing the issuer or client ID. Saving through the dashboard leaves the server’s password sign-in policy in effect.
+
+### Configure providers through deployment settings
 
 1. Register a confidential web client at the identity provider. Enable Authorization Code with S256 PKCE. Add the exact redirect URI `https://certhia.example.com/api/auth/oidc/<id>/callback`.
 2. Set `CERTHIA_AUTH_ORIGIN` to that dashboard origin and add its hostname to `CERTHIA_ALLOWED_HOSTS`. Set up HTTPS as above.
@@ -181,7 +192,7 @@ For each example, wrap the provider object in an array or add it to an existing 
 
 ## Disable local sign-in and recover access
 
-After verifying SSO as an administrator, you can set `CERTHIA_AUTH_LOCAL=0` and restart. Keep a separate enabled local administrator with a strong password in your emergency credential vault. Use an address that is outside all provider email-linking policies. Local password hashes are retained when local login is disabled. If the identity provider goes down, set `CERTHIA_AUTH_LOCAL=1`, restart, and use the emergency account. If a provider configuration prevents startup, remove the provider settings during recovery.
+After verifying a deployment-managed provider as an administrator, you can set `CERTHIA_AUTH_LOCAL=0` and restart. Keep a separate enabled local administrator with a strong password in your emergency credential vault. Use an address that is outside all provider email-linking policies. Local password hashes are retained when local login is disabled. If the identity provider goes down, set `CERTHIA_AUTH_LOCAL=1`, restart, and use the emergency account. If a provider configuration prevents startup, remove the provider settings during recovery.
 
 For a forgotten local admin password, run the server binary with the `reset-admin-password` command, the deployment's database connection settings, `CERTHIA_ADMIN_EMAIL`, and a new `CERTHIA_ADMIN_PASSWORD_FILE` mounted from your emergency secret store. Set `CERTHIA_AUTH_LOCAL=1` and clear broken OIDC configuration if needed. In a Compose deployment, you can run the command with `docker compose run --rm --no-deps app reset-admin-password` when the environment and secret mount are configured for that invocation. The command updates an enabled administrator, revokes that user's sessions, logs the recovery event, and exits without listening for requests. Remove the recovery secret and restore your intended deployment settings afterward.
 

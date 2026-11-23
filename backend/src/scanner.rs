@@ -84,27 +84,34 @@ impl Vault {
     }
 
     pub fn seal(&self, host: &str, credentials: &Credentials) -> Result<Vec<u8>> {
+        self.seal_bytes(host, &serde_json::to_vec(credentials)?)
+    }
+
+    pub(crate) fn seal_bytes(&self, purpose: &str, secret: &[u8]) -> Result<Vec<u8>> {
         let mut nonce = [0; 12];
         SystemRandom::new()
             .fill(&mut nonce)
             .map_err(|_| anyhow::anyhow!("System random source unavailable"))?;
-        let secret = serde_json::to_vec(credentials)?;
         let encrypted = self
             .0
             .encrypt(
                 &Nonce::from(nonce),
                 Payload {
-                    msg: &secret,
-                    aad: host.as_bytes(),
+                    msg: secret,
+                    aad: purpose.as_bytes(),
                 },
             )
-            .map_err(|_| anyhow!("Could not store registry credentials."))?;
+            .map_err(|_| anyhow!("Could not encrypt credentials."))?;
         Ok([nonce.to_vec(), encrypted].concat())
     }
 
     pub fn open_secret(&self, host: &str, secret: &[u8]) -> Result<Credentials> {
+        Ok(serde_json::from_slice(&self.open_bytes(host, secret)?)?)
+    }
+
+    pub(crate) fn open_bytes(&self, purpose: &str, secret: &[u8]) -> Result<Vec<u8>> {
         if secret.len() < 28 {
-            bail!("Saved registry credentials could not be read.");
+            bail!("Saved credentials could not be read.");
         }
         let (nonce, encrypted) = secret.split_at(12);
         let bytes = self
@@ -115,11 +122,11 @@ impl Vault {
                     .map_err(|_| anyhow!("Invalid saved nonce"))?,
                 Payload {
                     msg: encrypted,
-                    aad: host.as_bytes(),
+                    aad: purpose.as_bytes(),
                 },
             )
-            .map_err(|_| anyhow!("Saved registry credentials could not be read."))?;
-        Ok(serde_json::from_slice(&bytes)?)
+            .map_err(|_| anyhow!("Saved credentials could not be read."))?;
+        Ok(bytes)
     }
 }
 

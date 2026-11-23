@@ -1,6 +1,7 @@
 mod access;
 mod accounts;
 mod oidc;
+mod workspace_sso;
 
 use crate::{ApiError, ApiResult, App};
 use anyhow::{Context, Result, bail, ensure};
@@ -177,6 +178,10 @@ pub fn routes() -> Router<App> {
         .route("/auth/password", put(accounts::change_password))
         .route("/auth/oidc/{provider}/start", post(oidc::start))
         .route("/auth/oidc/{provider}/callback", get(oidc::callback))
+        .route(
+            "/settings/sso",
+            get(workspace_sso::get).put(workspace_sso::save),
+        )
         .route("/users", get(accounts::list).post(accounts::create))
         .route("/users/{id}", put(accounts::update))
         .route("/users/{id}/sessions/revoke", post(accounts::revoke))

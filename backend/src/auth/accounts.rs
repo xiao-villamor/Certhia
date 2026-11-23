@@ -269,15 +269,20 @@ pub async fn initialize(app: &App, recover: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn status(State(app): State<App>) -> ApiResult<Json<Value>> {
+pub async fn status(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Value>> {
     let has_users = has_users(&mut *app.0.database.primary.acquire().await?).await?;
-    let providers: Vec<_> = app
+    let mut providers: Vec<_> = app
         .0
         .auth
         .providers
         .iter()
         .map(|provider| json!({ "id": provider.id, "name": provider.name }))
         .collect();
+    if super::workspace_sso::origin(&app, &headers).is_some()
+        && let Some(workspace) = super::workspace_sso::active(&app).await?
+    {
+        providers.push(json!({ "id": super::workspace_sso::ID, "name": workspace.settings.name }));
+    }
     Ok(Json(json!({
         "local": app.0.auth.local,
         "setupRequired": app.0.auth.local && !has_users,
@@ -456,12 +461,15 @@ async fn password_for(connection: &mut PgConnection, id: Uuid) -> ApiResult<Opti
     )
 }
 
-pub async fn me(State(app): State<App>, Extension(session): Extension<Session>) -> Json<Value> {
-    Json(json!({
+pub async fn me(
+    State(app): State<App>,
+    Extension(session): Extension<Session>,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(json!({
         "user": session.user,
         "local": app.0.auth.local,
-        "oidcEmailLinking": app.0.auth.providers.iter().any(|provider| provider.link_by_email)
-    }))
+        "oidcEmailLinking": super::workspace_sso::email_linking(&app).await?
+    })))
 }
 
 pub async fn logout(
@@ -575,7 +583,7 @@ pub struct Create {
     password: Option<String>,
 }
 
-async fn admin_transaction<'a>(
+pub(super) async fn admin_transaction<'a>(
     pool: &'a PgPool,
     session: &Session,
 ) -> ApiResult<sqlx::Transaction<'a, sqlx::Postgres>> {
@@ -597,19 +605,14 @@ pub async fn create(
     let encoded = match input.password {
         Some(password) if app.0.auth.local => Some(new_hash(&app, password).await?),
         Some(_) => return Err(forbidden()),
-        None if app
-            .0
-            .auth
-            .providers
-            .iter()
-            .any(|provider| provider.link_by_email) =>
-        {
-            None
-        }
         None => {
-            return Err(ApiError::bad(
-                "Set an initial password or configure OIDC email linking.",
-            ));
+            if !super::workspace_sso::email_linking(&app).await? {
+                return Err(ApiError::bad(
+                    "Set an initial password or configure OIDC email linking.",
+                ));
+            }
+            self::email(&email)?;
+            None
         }
     };
     let mut tx = admin_transaction(&app.0.database.primary, &session).await?;

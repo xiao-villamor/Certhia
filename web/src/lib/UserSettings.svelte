@@ -105,10 +105,10 @@
   {#if adding || edited}
     <form class="form-panel wide" onsubmit={save}>
       <h3>{adding ? 'Add user' : 'Edit user'}</h3>
-      <div class="form-grid">
+      <div class="form-grid account-fields">
         <label class="field"><span>Username</span>
           <input bind:value={email} required maxlength="254" autocapitalize="none" spellcheck="false" readonly={!!edited} />
-          <small>A username, or an email address for single sign-on linking.</small>
+          {#if auth.session?.oidcEmailLinking}<small>Use their work email for an SSO-only account.</small>{/if}
         </label>
         <label class="field"><span>Display name</span>
           <input bind:value={displayName} required maxlength="100" />
@@ -143,7 +143,7 @@
       <tbody>
         {#each users as user (user.id)}
           <tr>
-            <td><strong>{user.displayName}</strong><small>{user.email}</small></td>
+            <td><strong>{user.displayName}</strong>{#if user.email !== user.displayName}<small>{user.email}</small>{/if}</td>
             <td class="role">{user.role}</td>
             <td>{user.disabled ? 'Disabled' : 'Enabled'}</td>
             <td><div class="filters">
@@ -166,4 +166,6 @@
 
 <style>
   .role { text-transform: capitalize; }
+  .account-fields { align-items: start; }
+  .account-fields :is(input, select) { height: 42px; }
 </style>

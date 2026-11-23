@@ -1,6 +1,7 @@
 <script lang="ts">
   import { auth, returnPath } from '#lib/auth.svelte.js';
   import UserSettings from '#lib/UserSettings.svelte';
+  import SingleSignOnSettings from '#lib/SingleSignOnSettings.svelte';
   import { productName } from '#lib/product.js';
   import { page } from '$app/state';
   import { onMount } from 'svelte';
@@ -28,7 +29,8 @@
     { id: 'image-watches', label: 'Image watches', href: '/settings?section=image-watches' },
     { id: 'findings-display', label: 'Findings display', href: '/settings?section=findings-display' },
     { id: 'reports', label: 'Reports', href: '/settings?section=reports' },
-    { id: 'users', label: 'Users', href: '/settings?section=users' }
+    { id: 'users', label: 'Users', href: '/settings?section=users' },
+    { id: 'sso', label: 'Single sign-on', href: '/settings?section=sso' }
   ] as const;
   const trackerReturn = $derived(returnPath(new URL(page.url.href)));
   const requestedSection = $derived(page.url.searchParams.get('section') ?? page.url.hash.slice(1));
@@ -379,6 +381,8 @@
     <FindingDisplaySettings />
   {:else if section === 'users'}
     <UserSettings />
+  {:else if section === 'sso'}
+    <SingleSignOnSettings />
   {:else if section === 'reports'}
     <ReportBrandingSettings />
   {/if}
@@ -387,7 +391,7 @@
 <style>
   .settings-workspace { max-inline-size: 92rem; container-type: inline-size; }
   .settings-nav { margin-bottom: 1.25rem; }
-  .settings-nav a { min-height: 44px; padding-inline: .85rem; font-size: .875rem; }
+  .settings-nav a { min-height: 44px; padding-inline: .65rem; font-size: .875rem; }
   .settings-nav a:focus-visible { outline-offset: -3px; }
   .draft-dot { width: .42rem; height: .42rem; flex: none; border-radius: 50%; background: var(--high); }
   .settings-workspace :global(#notifications-title),

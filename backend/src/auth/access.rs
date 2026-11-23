@@ -124,6 +124,7 @@ pub fn classify(method: &str, path: &str) -> Option<Access> {
             "GET" | "HEAD",
             "/users"
             | "/settings"
+            | "/settings/sso"
             | "/settings/report-branding"
             | "/registries/{id}/webhook"
             | "/audit-logs",
@@ -146,6 +147,7 @@ pub fn classify(method: &str, path: &str) -> Option<Access> {
             "/users/{id}"
             | "/registries/{id}"
             | "/settings"
+            | "/settings/sso"
             | "/settings/scanners"
             | "/settings/report-branding"
             | "/settings/report-branding/logo"
