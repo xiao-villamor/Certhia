@@ -6,9 +6,9 @@ Certhia is a self-hosted tool for scanning container images and keeping the repo
 
 [Quick start](#quick-start) · [Private registries](docs/private-registries.md) · [Kubernetes discovery](docs/kubernetes-discovery-scheduling.md) · [Company sign-in](docs/auth.md)
 
-[![Certhia demo comparing two checkout-api tags and exporting their scan evidence](docs/media/certhia-overview.jpg)](docs/media/certhia-overview.mp4)
+https://github.com/user-attachments/assets/cf2bfabc-2101-46cd-9c1a-1f5b67018a42
 
-[Watch the 53-second demo](docs/media/certhia-overview.mp4)
+[Download the full-resolution MP4](https://raw.githubusercontent.com/xiao-villamor/Certhia/main/docs/media/certhia-overview.mp4)
 
 ## Quick start
 
