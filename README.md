@@ -73,7 +73,7 @@ The comparator reconciles explicit advisory aliases and one-to-one Alpine binary
 ## Scan a private image
 
 1. Open **Registry connections → Add registry** and enter the exact registry host, username, and token or password with pull access.
-2. Paste a tag or digest into **Image to test**, then choose **Test image access**. This checks manifest access separately from catalog permissions.
+2. Paste a tag or digest into **Image to test**, select the scan platform, then choose **Test image access**. This reads the manifest and image configuration. The scan downloads the layers.
 3. Save the connection and choose **Scan image** on its row, or select it under **Registry connection** in **Start scan**. Pick a repository and tag or enter a reference manually. The connection can pull an exact image even when the registry restricts catalog access.
 
 Some registries issue tokens from a different host than the one that serves images. When the registry's `WWW-Authenticate` challenge names another token service, enter that hostname under **Connection options → Separate token host** for catalog browsing. A scoped pull token can work when the registry disables catalog listing.

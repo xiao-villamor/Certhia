@@ -8,8 +8,8 @@
   import RegistryCatalogPicker from '#lib/RegistryCatalogPicker.svelte';
   import { api, message, platforms, post, scannerName, scannerProviders, type Registry, type ScannerAvailability, type ScanRetryOptions, allRegistries } from '#lib/api.js';
 
-  let { initialMode = 'registry', initialReference = '', initialRegistry = '', retryOptions, dismiss }:
-    { initialMode?: string; initialReference?: string; initialRegistry?: string; retryOptions?: ScanRetryOptions; dismiss?: () => void } = $props();
+  let { initialMode = 'registry', initialReference = '', initialRegistry = '', initialPlatform = platforms[0], retryOptions, dismiss }:
+    { initialMode?: string; initialReference?: string; initialRegistry?: string; initialPlatform?: string; retryOptions?: ScanRetryOptions; dismiss?: () => void } = $props();
   const uid = $props.id();
   let selectedMode = $state<string>();
   const mode = $derived(selectedMode ?? initialMode);
@@ -125,7 +125,7 @@
     reference = initialReference;
     registryId = initialRegistry;
     manualRegistryReference = !!initialReference.trim();
-    platform = retryOptions?.platform ?? 'linux/amd64';
+    platform = retryOptions?.platform ?? initialPlatform;
     scanners = retryOptions?.scanners ?? [];
     priority = retryOptions?.priority ?? 0;
   });

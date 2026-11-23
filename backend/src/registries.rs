@@ -295,6 +295,7 @@ async fn connection(app: &App, id: &str) -> ApiResult<Connection> {
 #[serde(rename_all = "camelCase")]
 struct TestTarget {
     reference: String,
+    platform: Option<String>,
     protocol: Option<String>,
     skip_tls: Option<bool>,
 }
@@ -307,6 +308,8 @@ async fn test_saved(
     let mut connection = connection(&app, &id).await?;
     let reference =
         ImageReference::parse(&input.reference, Some(&connection.host)).map_err(ApiError::bad)?;
+    let platform = input.platform.as_deref().unwrap_or(crate::domain::PLATFORMS[0]);
+    crate::validate_platform(platform)?;
     if let Some(protocol) = input.protocol {
         if !matches!(protocol.as_str(), "https" | "http") {
             return Err(ApiError::bad("Choose HTTPS or HTTP for the registry."));
@@ -323,16 +326,18 @@ async fn test_saved(
         manifest(&connection, &reference)
             .await
             .map_err(ApiError::bad)?;
+    }
+    // Keep workload identity refresh on the same path used by image pulls.
+    let insecure = connection.protocol == "http" || connection.skip_tls;
+    let credentials = if workload(connection.auth.as_ref()) {
+        Some(cloud::scanner_marker().map_err(ApiError::bad)?)
     } else {
-        crate::scanner::test(
-            &reference,
-            connection.auth,
-            connection.protocol == "http" || connection.skip_tls,
-        )
+        connection.auth
+    };
+    crate::images::verify_access(&reference, platform, credentials, insecure)
         .await
         .map_err(ApiError::bad)?;
-    }
-    Ok(Json(json!({"reference":reference.value})))
+    Ok(Json(json!({"reference":reference.value,"platform":platform})))
 }
 
 pub async fn insecure(app: &App, id: Option<&str>) -> Result<bool> {

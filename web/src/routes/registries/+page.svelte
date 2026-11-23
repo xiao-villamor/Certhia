@@ -5,7 +5,7 @@
   import { Database, KeyRound, Pencil, Plus, RefreshCw, ScanLine, Trash2, Webhook } from '@lucide/svelte';
   import ConfigDialog from '#lib/ConfigDialog.svelte';
   import RegistryWebhook from '#lib/RegistryWebhook.svelte';
-  import { api, message, post, registryPage, type Registry } from '#lib/api.js';
+  import { api, message, platforms, post, registryPage, type Registry } from '#lib/api.js';
 
   let registries = $state<Registry[]>([]);
   let cursor = $state<string | null>(null);
@@ -21,7 +21,7 @@
     ['acr','Azure Container Registry',''],['harbor','Harbor',''],['nexus','Sonatype Nexus',''],['artifactory','JFrog Artifactory',''],
     ['forgejo','Forgejo',''],['gitea','Gitea',''],['quay','Quay','quay.io'],
   ];
-  const initial = { name:'', host:'', username:'', password:'', reference:'', provider:'oci', authHost:'', autoSync:false, clearCredentials:false, protocol:'https', skipTls:false, namespace:'' };
+  const initial = { name:'', host:'', username:'', password:'', reference:'', platform:platforms[0], provider:'oci', authHost:'', autoSync:false, clearCredentials:false, protocol:'https', skipTls:false, namespace:'' };
   let form = $state({...initial});
   let editing = $state('');
   let workload = $state(false);
@@ -39,10 +39,13 @@
   let imageIssue = $state('');
   let repository = $state('');
   let exactReference = $state('');
-  let manifestResult = $state('');
-  let manifestBusy = $state(false);
+  let testPlatform = $state(platforms[0]);
+  let accessResult = $state<{registry: string; reference: string; platform: string; text: string; failed: boolean}>();
+  let accessBusy = $state(false);
   let tagRequest = 0;
   const visible = $derived(catalog?.images ?? []);
+  const scanReference = $derived(exactReference.trim().replace(/^http:\/\//, '') || (browser && selectedImage && tag ? selectedImage + ':' + tag : ''));
+  const currentAccessResult = $derived(accessResult?.registry === browser?.id && accessResult?.reference === scanReference && accessResult?.platform === testPlatform ? accessResult : undefined);
   function edit(registry?: Registry) {
     editing = registry?.id || '';
     form = registry ? {...initial, name:registry.name, host:registry.host, provider:registry.provider, authHost:registry.authHost || '', autoSync:registry.autoSync, protocol:registry.protocol, skipTls:registry.skipTls, namespace:registry.namespace || ''} : {...initial};
@@ -55,7 +58,7 @@
   async function browse(registry: Registry, refreshCatalog = false, cursor?: string) {
     if (browser?.id !== registry.id) {
       browser = registry; catalog = undefined; tags = []; imageFilter = ''; selectedImage = ''; tag = '';
-      repository = ''; exactReference = ''; manifestResult = ''; imageIssue = ''; tagRequest++;
+      repository = ''; exactReference = ''; accessResult = undefined; imageIssue = ''; tagRequest++;
     }
     browseBusy = true; catalogIssue = '';
     try {
@@ -82,18 +85,22 @@
     }
   }
 
-  async function testManifest() {
-    if (!browser || manifestBusy) return;
-    const registry = browser.id;
-    manifestBusy = true;
-    manifestResult = '';
+  function accessMessage(result: {reference: string; platform: string}) {
+    return 'Image configuration verified for ' + result.reference + ' on ' + result.platform + '. Image layers are downloaded during the scan.';
+  }
+
+  async function testImageAccess() {
+    if (!browser || accessBusy || !scanReference) return;
+    const target = {registry:browser.id, reference:scanReference, platform:testPlatform};
+    accessBusy = true;
+    accessResult = undefined;
     try {
-      const result = await api<{reference:string}>('/registries/' + registry + '/test', post({reference:exactReference.trim()}));
-      if (browser?.id === registry) manifestResult = 'Manifest access verified for ' + result.reference + '.';
+      const result = await api<{reference:string; platform:string}>('/registries/' + target.registry + '/test', post({reference:target.reference, platform:target.platform}));
+      accessResult = {...target, text:accessMessage(result), failed:false};
     } catch (error) {
-      if (browser?.id === registry) manifestResult = message(error);
+      accessResult = {...target, text:message(error), failed:true};
     } finally {
-      manifestBusy = false;
+      accessBusy = false;
     }
   }
 
@@ -152,9 +159,9 @@
         const saved = editing && !form.username && !form.password && !form.clearCredentials;
         const endpoint = saved ? '/registries/' + editing + '/test' : '/registries/test';
         const reference = form.reference.trim().replace(/^http:\/\//, '');
-        const result = await api<{ reference: string }>(endpoint, post({...form, reference,
+        const result = await api<{ reference: string; platform: string }>(endpoint, post({...form, reference,
           ...(form.clearCredentials ? {username:'', password:''} : {})}));
-        feedback = 'Manifest access verified for ' + result.reference + '.';
+        feedback = accessMessage(result);
       } else {
         const data = workload ? {...form, username:workloadMarker, password:workloadMarker,
           protocol:'https', skipTls:false, authHost:'', clearCredentials:false} : form;
@@ -249,10 +256,15 @@
         <label class="inline-check"><input type="checkbox" bind:checked={form.autoSync} /> Refresh the catalog automatically</label>
       </div>
     </details>
-    <label class="field">
-      <span>Image to test <small>Optional</small></span>
-      <input class="mono" value={form.reference} oninput={(event) => setReference(event.currentTarget.value)} placeholder="registry.example.com/team/image:version" />
-    </label>
+    <div class="form-grid">
+      <label class="field">
+        <span>Image to test <small>Optional</small></span>
+        <input class="mono" value={form.reference} oninput={(event) => { setReference(event.currentTarget.value); feedback = ''; }} placeholder="registry.example.com/team/image:version" />
+      </label>
+      <label class="field"><span>Test platform</span><select bind:value={form.platform} onchange={() => { feedback = ''; }}>
+        {#each platforms as value}<option>{value}</option>{/each}
+      </select></label>
+    </div>
     {#if issue}<div class="notice error" role="alert">{issue}</div>{/if}
     {#if feedback}<div class="notice success" role="status">{feedback}</div>{/if}
     {#snippet actions()}
@@ -322,13 +334,15 @@
     </div>
     <div class="filters">
       <button class="button secondary" disabled={!repository.trim()} onclick={() => choose(repository)}>Look up tags</button>
-      {#if auth.admin}<button class="button secondary" disabled={manifestBusy || !exactReference.trim()} onclick={testManifest}>Test manifest access</button>{/if}
     </div>
     {#if tags.length}<label class="field"><span>Tag for {selectedImage}</span><select bind:value={tag}>{#each tags as tag}<option>{tag}</option>{/each}</select></label>{/if}
     {#if imageIssue}<div class="notice warning" role="status">{imageIssue}</div>{/if}
-    {#if manifestResult}<div class="notice" role="status">{manifestResult}</div>{/if}
+    <label class="field"><span>Platform</span><select bind:value={testPlatform}>{#each platforms as value}<option>{value}</option>{/each}</select></label>
+    {#if currentAccessResult}<div class="notice" class:error={currentAccessResult.failed} class:success={!currentAccessResult.failed}
+      role={currentAccessResult.failed ? 'alert' : 'status'}>{currentAccessResult.text}</div>{/if}
     <div class="filters">
-      <a class="button primary" href={'/scans/new?' + new URLSearchParams({registry:browser.id, image:exactReference.trim() || (selectedImage && tag ? selectedImage + ':' + tag : '')})}><ScanLine size={17} /> Scan image</a>
+      {#if auth.admin}<button class="button secondary" disabled={accessBusy || !scanReference} onclick={testImageAccess}>{accessBusy ? 'Testing…' : 'Test image access'}</button>{/if}
+      <a class="button primary" href={'/scans/new?' + new URLSearchParams({registry:browser.id, image:scanReference, platform:testPlatform})}><ScanLine size={17} /> Scan image</a>
       {#if tags.length > 1}<a class="button secondary" href={'/scans/bulk?' + new URLSearchParams({registry:browser.id, images:tags.slice(0,50).map(tag => selectedImage + ':' + tag).join('\n')})}>Queue tags in bulk</a>{/if}
     </div>
   </div>

@@ -178,6 +178,11 @@ fn check_exit(status: ExitStatus, stderr: &[u8], binary: &str) -> Result<()> {
                 "The scan worker could not write temporary image files. Check its data directory and free space."
             );
         }
+        if binary == "Trivy" && (reason.contains("[vulndb") || reason.contains("[javadb") || reason.contains("db error"))
+            && reason.contains("download")
+        {
+            bail!("Trivy could not download a scanning database. Check access to its database registry.");
+        }
         if ["toomanyrequests", "rate limit", "429 too many requests"]
             .iter()
             .any(|text| reason.contains(text))
@@ -186,11 +191,21 @@ fn check_exit(status: ExitStatus, stderr: &[u8], binary: &str) -> Result<()> {
                 "The registry limited image requests. Wait before retrying or choose an authenticated registry connection."
             );
         }
-        if ["unauthorized", "authentication", "denied", "401", "403"]
+        if reason.contains("server gave http response to https client") {
+            bail!("This registry answered over HTTP. Check the saved connection protocol.");
+        }
+        if ["no image found in image index", "no matching manifest", "no image found in manifest list"]
             .iter()
             .any(|text| reason.contains(text))
         {
-            bail!("Registry access denied. Verify the username and token have pull access.");
+            bail!("The requested platform is unavailable for this image.");
+        }
+        if ["blob unknown", "blob_unknown", "blob not found", "unexpected http status: 404", "status code: 404"]
+            .iter()
+            .any(|text| reason.contains(text))
+            && (reason.contains("blob") || reason.contains("layer"))
+        {
+            bail!("The registry or its storage is missing an image blob. Check that the image was fully pushed and its blobs are still available.");
         }
         if ["manifest unknown", "name unknown", "manifest_unknown"]
             .iter()
@@ -198,20 +213,26 @@ fn check_exit(status: ExitStatus, stderr: &[u8], binary: &str) -> Result<()> {
         {
             bail!("The registry could not find that image tag or digest.");
         }
+        if ["unauthorized", "authentication", "denied", "status code: 401", "status code: 403", "401 unauthorized", "403 forbidden"]
+            .iter()
+            .any(|text| reason.contains(text))
+        {
+            bail!("Registry access denied. Check that the selected connection has a current credential with pull access to this repository.");
+        }
         if reason.contains("x509") || reason.contains("certificate") {
             bail!("The registry TLS certificate could not be verified.");
         }
-        if reason.contains("no image found in image index")
-            || reason.contains("no matching manifest")
+        if ["unsupported media type", "unsupported compression", "unknown compression", "does not support compression"]
+            .iter()
+            .any(|text| reason.contains(text))
         {
-            bail!("The requested platform is unavailable for this image.");
-        }
-        if reason.contains("db") && reason.contains("download") {
-            bail!("Trivy could not download its vulnerability database.");
+            bail!("{binary} could not prepare this image format. Check the manifest media type and layer compression.");
         }
         if reason.contains("lookup")
             || reason.contains("connection refused")
             || reason.contains("timeout")
+            || reason.contains("connection reset")
+            || reason.contains("unexpected eof")
         {
             bail!("The registry or a scanner dependency is unreachable.");
         }
@@ -310,34 +331,6 @@ fn trivy_step(line: &str) -> Option<(&'static str, &'static str, &'static str)> 
     } else {
         None
     }
-}
-
-pub async fn test(
-    reference: &ImageReference,
-    credentials: Option<Credentials>,
-    insecure: bool,
-) -> Result<()> {
-    let directory = tempfile::tempdir()?;
-    let config = directory.path().join("config.json");
-    let credentials = crate::registries::pull_credentials(&reference.host, credentials).await?;
-    docker_config(&config, &reference.host, credentials)?;
-    let mut command = Command::new("skopeo");
-    command
-        .arg("inspect")
-        .arg("--raw")
-        .arg("--authfile")
-        .arg(config);
-    if insecure {
-        command.arg("--tls-verify=false");
-    }
-    command.arg(format!("docker://{}", reference.value));
-    let output = run(command, "Skopeo", Duration::from_secs(30)).await?;
-    let manifest: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .context("The registry did not return an image manifest.")?;
-    if manifest["schemaVersion"] != 2 {
-        bail!("The registry did not return a supported image manifest.");
-    }
-    Ok(())
 }
 
 pub enum Target<'a> {
@@ -503,5 +496,25 @@ mod tests {
         );
         assert!(vault.open_secret("other.example", &encrypted).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn image_pull_errors_distinguish_missing_blobs_from_credentials_and_platform() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let examples = [
+            ("reading blob: blob unknown", "missing an image blob"),
+            ("reading blob: unexpected HTTP status: 404", "missing an image blob"),
+            ("reading blob: 403 Forbidden signed-url-secret", "Registry access denied"),
+            ("no image found in image index", "requested platform is unavailable"),
+            ("unknown error for digest sha256:abc403def", "could not read this image"),
+        ];
+        for (message, expected) in examples {
+            let error = check_exit(ExitStatus::from_raw(256), message.as_bytes(), "Skopeo")
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+            assert!(!error.contains("signed-url-secret"));
+        }
     }
 }

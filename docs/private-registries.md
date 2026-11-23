@@ -1,6 +1,8 @@
 # Private registry connections
 
-Catalog browsing, listing tags for a known repository, and retrieving a manifest for a tag or digest are separate operations. In **Registry connections → Browse**, enter the repository to look up its tags, or enter the complete image reference to test its manifest and start a scan. A manifest test confirms access to the manifest. A scan also needs access to the image’s config and layers.
+In **Registry connections → Browse**, choose a repository and tag or enter a full image reference. Select a platform and choose **Test image access** to verify the manifest and image configuration. **Scan image** carries the same reference, platform, and registry connection into the scan form.
+
+The scan downloads the image layers. A registry can serve the manifest and config while its storage denies or fails a layer download. The failed scan identifies the stage. If it reports a missing blob, check that the image was fully pushed and that its storage still has the layers. If access is denied, check the saved credential’s pull permissions for that repository. Catalog and tag listing permissions are checked separately.
 
 ## GitHub Container Registry
 

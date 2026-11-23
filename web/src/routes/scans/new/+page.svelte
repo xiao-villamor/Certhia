@@ -2,7 +2,7 @@
   import { page } from '$app/state';
   import { productName } from '#lib/product.js';
   import StartScanForm from '#lib/StartScanForm.svelte';
-  import { api, message, type ScanRetryOptions } from '#lib/api.js';
+  import { api, message, platforms, type ScanRetryOptions } from '#lib/api.js';
 
   const retry = $derived(page.url.searchParams.get('retry'));
   let original = $state<ScanRetryOptions>();
@@ -11,6 +11,7 @@
   let attempt = $state(0);
   const mode = $derived(page.url.searchParams.get('mode') || original?.source || 'registry');
   const importing = $derived(mode === 'import');
+  const platform = $derived(platforms.find(value => value === page.url.searchParams.get('platform')));
 
   $effect(() => {
     void attempt;
@@ -39,5 +40,5 @@
   <div class="notice error" role="alert">{issue} <button class="button secondary" onclick={() => attempt++}>Try again</button></div>
 {:else}
   <StartScanForm initialMode={mode} initialReference={page.url.searchParams.get('image') ?? original?.reference ?? ''}
-    initialRegistry={page.url.searchParams.get('registry') ?? original?.registryId ?? ''} retryOptions={original} />
+    initialRegistry={page.url.searchParams.get('registry') ?? original?.registryId ?? ''} initialPlatform={platform} retryOptions={original} />
 {/if}

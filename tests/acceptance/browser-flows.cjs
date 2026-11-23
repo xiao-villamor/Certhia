@@ -20,6 +20,8 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     const scopes = [];
     let catalogMode = 'restricted';
     let artifactReply = 'error';
+    let role = user.role;
+    let probedTarget;
     let releaseSlow;
     page.setDefaultTimeout(5500);
     page.on('pageerror', error => violations.push(error.message));
@@ -34,7 +36,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
         }
         return route.fulfill({path:path.join(root,'200.html'), contentType:'text/html'});
       }
-      if (key === '/api/auth/me') return json({user,local:true,oidcEmailLinking:false});
+      if (key === '/api/auth/me') return json({user:{...user,role},local:true,oidcEmailLinking:false});
       if (key === '/api/registries') return json([registry,customRegistry]);
       if (key === '/api/scanners/available') return json({local:['trivy','syft'],registry:['trivy','syft'],defaults:['trivy']});
       if (key === '/api/discover/kubernetes/namespaces') return json({error:'Namespace enumeration is restricted.'},403);
@@ -59,6 +61,11 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
         return json({error:'Unexpected repository reference.'},400);
       }
       if (key === '/api/registries/reg-2/catalog') return json({images:[],refreshedAt:null,error:'Custom registry catalog listing is restricted.',nextCursor:null});
+      if (key === '/api/registries/reg-2/test') {
+        probedTarget = req.postDataJSON();
+        if (probedTarget.platform === 'linux/amd64') return json({error:'The image configuration does not match linux/amd64.'},400);
+        return json({reference:customRegistry.host + '/' + probedTarget.reference,platform:probedTarget.platform});
+      }
       if (key === '/api/scans' && req.method() === 'POST') {
         submissions.push(req.postDataJSON());
         return json({id:'inventory'},202);
@@ -245,7 +252,30 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     assert.equal(await dialog.getByRole('textbox',{name:/Image reference/}).inputValue(),'');
     await dialog.getByRole('button',{name:'Cancel',exact:true}).click();
     assert.equal(await dialog.count(),0);
-    assert.deepEqual(violations,[]);
     console.log('PASS mobile launch dialog, all namespaces, change of source, no browser exceptions');
+
+    role = 'admin';
+    await page.setViewportSize({width:1280,height:800});
+    await page.goto(origin + '/registries');
+    const connectionRow = main.getByRole('row').filter({hasText:customRegistry.name});
+    await connectionRow.getByRole('button',{name:'Browse'}).click();
+    await main.getByRole('textbox',{name:'Exact image reference'}).fill('team/api:1.0');
+    const testAccess = main.getByRole('button',{name:'Test image access'});
+    const targetPlatform = main.getByRole('combobox',{name:'Platform',exact:true});
+    await testAccess.click();
+    await main.getByRole('alert').filter({hasText:'does not match linux/amd64'}).waitFor();
+    await targetPlatform.selectOption('linux/arm64');
+    assert.equal(await main.getByRole('alert').filter({hasText:'does not match linux/amd64'}).count(),0);
+    await testAccess.click();
+    await main.getByText('Image layers are downloaded during the scan.',{exact:false}).waitFor();
+    assert.deepEqual(probedTarget,{reference:'team/api:1.0',platform:'linux/arm64'});
+    await main.getByRole('link',{name:'Scan image',exact:true}).last().click();
+    await page.waitForURL('**/scans/new?**');
+    await ref.waitFor();
+    assert.equal(await targetPlatform.inputValue(),'linux/arm64');
+    assert.equal(await ref.inputValue(),'team/api:1.0');
+    assert.equal(await profile.inputValue(),customRegistry.id);
+    assert.deepEqual(violations,[]);
+    console.log('PASS registry access errors, config verification, and scan platform handoff');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error);process.exitCode=1; });

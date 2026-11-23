@@ -1,6 +1,8 @@
 """Run from a Certhia checkout after building the Rust binary and the web UI."""
+import base64
 import contextlib
 from datetime import datetime, timedelta, timezone
+import gzip
 import hashlib
 import http.cookiejar
 import http.server
@@ -38,7 +40,8 @@ class JsonHandler(http.server.BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != 'HEAD':
+            self.wfile.write(body)
 
     def log_message(self, *args):
         pass
@@ -68,8 +71,47 @@ class GiteaFixture(JsonHandler):
                 self.reply(200, [{'name': 'api'}] if query.get('page') == ['1'] else [])
         elif url.path == '/v2/team/api/tags/list':
             self.reply(403, {}) if self.server.deny_tags else self.reply(200, {'tags': ['v1']})
+        elif self.server.image and url.path.startswith('/v2/'):
+            self.image_response(url.path)
         else:
             self.reply(404, {})
+
+    def do_HEAD(self):
+        self.do_GET()
+
+    def image_response(self, path):
+        expected = 'Basic ' + base64.b64encode(f'tester:{self.server.token}'.encode()).decode()
+        if self.headers.get('Authorization') != expected:
+            self.send_response(401)
+            self.send_header('WWW-Authenticate', 'Basic realm="private registry fixture"')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
+        image = self.server.image
+        if path == '/v2/':
+            self.reply(200, {})
+            return
+        if path in ('/v2/team/api/manifests/v1', '/v2/team/api/manifests/' + image['digest']):
+            body, media = image['manifest'], 'application/vnd.docker.distribution.manifest.v2+json'
+        elif path == '/v2/team/api/blobs/' + image['config_digest']:
+            if self.server.denied_blob == 'config':
+                self.reply(403, {'errors':[{'code':'DENIED','message':'config denied'}]})
+                return
+            body, media = image['config'], 'application/octet-stream'
+        elif path == '/v2/team/api/blobs/' + image['layer_digest']:
+            if self.server.denied_blob == 'layer':
+                self.reply(404, {'errors':[{'code':'BLOB_UNKNOWN','message':'blob unknown'}]})
+                return
+            body, media = image['layer'], 'application/octet-stream'
+        else:
+            self.reply(404, {})
+            return
+        self.send_response(200)
+        self.send_header('Content-Type', media)
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        if self.command != 'HEAD':
+            self.wfile.write(body)
 
 
 @contextlib.contextmanager
@@ -304,6 +346,76 @@ def image_archive(name, version):
     layer_name = layer_id + '/layer.tar'
     manifest = [{'Config': config_name, 'RepoTags': ['certhia/fixture:test'], 'Layers': [layer_name]}]
     return tar_bytes({'manifest.json': json.dumps(manifest).encode(), config_name: config, layer_name: layer})
+
+
+def test_private_pull(api, gitea, tmp, bindir, skopeo):
+    with tarfile.open(fileobj=io.BytesIO(image_archive('private-fixture', '1.0'))) as archive:
+        entry = json.load(archive.extractfile('manifest.json'))[0]
+        config = archive.extractfile(entry['Config']).read()
+        layer = gzip.compress(archive.extractfile(entry['Layers'][0]).read())
+    digest = lambda data: 'sha256:' + hashlib.sha256(data).hexdigest()
+    manifest = json.dumps({
+        'schemaVersion': 2, 'mediaType': 'application/vnd.docker.distribution.manifest.v2+json',
+        'config': {'mediaType': 'application/vnd.docker.container.image.v1+json', 'size': len(config), 'digest': digest(config)},
+        'layers': [{'mediaType': 'application/vnd.docker.image.rootfs.diff.tar.gzip', 'size': len(layer), 'digest': digest(layer)}],
+    }).encode()
+    gitea.image = {'manifest': manifest, 'digest': digest(manifest), 'config': config,
+                   'config_digest': digest(config), 'layer': layer, 'layer_digest': digest(layer)}
+    gitea.denied_blob = None
+
+    host = f'127.0.0.1:{gitea.server_port}'
+    connection = {'name': 'Private pull fixture', 'host': host, 'protocol': 'http',
+                  'username': 'tester', 'password': gitea.token}
+    target = {'reference': 'team/api:v1', 'platform': 'linux/amd64'}
+    trivy = bindir / 'trivy'
+    report = tmp / 'private-pull-report.json'
+    report.write_text(json.dumps({'SchemaVersion': 2, 'ArtifactType': 'container_image', 'Results': []}))
+    trivy.write_text(f'''#!/bin/sh
+while [ "$#" -gt 1 ]; do
+  case "$1" in
+    --input) image="$2" ;;
+    --output) report="$2" ;;
+  esac
+  shift
+done
+[ -s "$image" ] && /bin/cp {shlex.quote(str(report))} "$report"
+''')
+    trivy.chmod(0o700)
+    (bindir / 'skopeo').symlink_to(Path(skopeo).resolve(strict=True))
+    try:
+        assert api.read('/registries/test', {**connection, **target})['platform'] == target['platform']
+        profile = api.read('/registries', connection, status=201)['id']
+        probe = '/registries/' + profile + '/test'
+        assert api.read(probe, target)['reference'] == host + '/team/api:v1'
+        wrong_platform = api.read(probe, {**target, 'platform': 'linux/arm64'}, status=400)
+        assert 'does not match linux/arm64' in wrong_platform['error'], wrong_platform
+        gitea.denied_blob = 'config'
+        denied = api.read(probe, target, status=400)['error']
+        assert 'image configuration' in denied and 'access denied' in denied.lower(), denied
+
+        def scan():
+            queued = api.read('/scans', {**target, 'registryId': profile, 'scanners': ['trivy']}, status=202)['id']
+            for _ in range(120):
+                detail = api.read('/scans/' + queued)
+                if detail['status'] in ('completed', 'failed'):
+                    return detail
+                time.sleep(.25)
+            raise TimeoutError('Private image scan did not finish')
+
+        gitea.denied_blob = 'layer'
+        assert api.read(probe, target)['platform'] == target['platform']
+        error = scan().get('error') or ''
+        assert 'download and prepare image layers' in error and 'missing an image blob' in error, error
+        assert gitea.token not in error
+
+        gitea.denied_blob = None
+        result = scan()
+        assert result['status'] == 'completed' and result['report']['digest'] == digest(manifest), result
+    finally:
+        trivy.unlink()
+        (bindir / 'skopeo').unlink()
+        gitea.image = None
+    print('PASS private registry auth and platform probe, blocked config, missing layer, and Trivy scan of a pulled image', flush=True)
 
 
 def scan_archive(api, archive, reference, engines, completed=None):
@@ -823,6 +935,7 @@ def main():
         docker_fixture.services = 200, []
         gitea.token = secrets.token_urlsafe(32)
         gitea.deny_catalog = gitea.deny_tags = False
+        gitea.image = None
         bindir = install_kubectl(tmp)
         binaries = {tool: os.environ.get('CERTHIA_TEST_' + tool.upper()) or shutil.which(tool)
                     for tool in ('trivy', 'grype', 'syft')}
@@ -841,7 +954,7 @@ def main():
         email, password = 'ux@example.test', secrets.token_urlsafe(32)
         env = {'PATH': str(bindir), 'DATABASE_URL': database, 'CERTHIA_ADMIN_EMAIL': email,
                'CERTHIA_ADMIN_PASSWORD': password, 'CERTHIA_AUTH_SECURE_COOKIE': '0', 'CERTHIA_BIND': bind,
-               'CERTHIA_WEB_DIR': str(WEB), 'CERTHIA_DATA_DIR': str(tmp / 'data'),
+               'CERTHIA_WEB_DIR': str(WEB), 'CERTHIA_DATA_DIR': str(tmp / 'data'), 'TMPDIR': str(tmp),
                'KUBECONFIG': str(tmp / 'isolated-kubeconfig'), 'CERTHIA_DOCKER_SOCKET': socket_path}
         if seeds:
             env.update(TRIVY_SKIP_DB_UPDATE='true', TRIVY_SKIP_JAVA_DB_UPDATE='true',
@@ -866,6 +979,11 @@ def main():
                 env={**os.environ, 'CERTHIA_TEST_EMAIL':email, 'CERTHIA_TEST_PASSWORD':password}, check=True)
             test_discovery(api, docker_fixture, tmp, database_container)
             test_sbom(api, bindir)
+            skopeo = os.environ.get('CERTHIA_TEST_SKOPEO') or shutil.which('skopeo')
+            if skopeo:
+                test_private_pull(api, gitea, tmp, bindir, skopeo)
+            else:
+                print('SKIP private registry pull: install Skopeo or set CERTHIA_TEST_SKOPEO', flush=True)
             test_registries(api, gitea)
             test_reports(api, email, password)
             test_shared_ticket(api, email, password)

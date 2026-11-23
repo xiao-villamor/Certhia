@@ -200,6 +200,7 @@ struct RegistryInput {
 struct TestRegistry {
     host: String,
     reference: String,
+    platform: Option<String>,
     #[serde(default)]
     username: String,
     #[serde(default)]
@@ -302,15 +303,18 @@ async fn remove_registry(State(app): State<App>, Path(id): Path<String>) -> ApiR
 async fn test_registry(Json(input): Json<TestRegistry>) -> ApiResult<Json<serde_json::Value>> {
     let host = registry_host(&input.host).map_err(ApiError::bad)?;
     let reference = ImageReference::parse(&input.reference, Some(&host)).map_err(ApiError::bad)?;
+    let platform = input.platform.as_deref().unwrap_or(domain::PLATFORMS[0]);
+    validate_platform(platform)?;
     let credentials = credentials(input.username.trim().to_owned(), input.password)?;
-    scanner::test(
+    images::verify_access(
         &reference,
+        platform,
         credentials,
         input.skip_tls || input.protocol.as_deref() == Some("http"),
     )
     .await
     .map_err(ApiError::bad)?;
-    Ok(Json(json!({ "reference": reference.value })))
+    Ok(Json(json!({ "reference": reference.value, "platform": platform })))
 }
 
 async fn list_scans(
@@ -605,7 +609,9 @@ async fn run_scan(app: &App, job: &store::Job, activity: jobs::Activity<'_>) -> 
             )
         }
     };
-    let captured = if selected == ["trivy"] {
+    // Use the same registry client as the access check for authenticated images.
+    let stage_remote = matches!(target, scanner::Target::Remote(_, insecure) if insecure || credentials.is_some());
+    let captured = if selected == ["trivy"] && !stage_remote {
         scanner::scan(target, &job.platform, credentials, &app.0.cache, activity).await?
     } else {
         native_scanners::scan(app, job, target, credentials, &selected, activity).await?

@@ -28,6 +28,7 @@ pub async fn scan(
     let data = tokio::fs::canonicalize(&app.0.data).await?;
     let work = tempfile::tempdir_in(data.join("archives"))?;
     let staged = work.path().join("image.tar");
+    let remote = matches!(target, Target::Remote(..));
     let mut digest = None;
     let source = match target {
         Target::Remote(reference, insecure) => {
@@ -80,7 +81,14 @@ pub async fn scan(
             None,
             false,
         )
-        .await?;
+        .await
+        .map_err(|error| {
+            if remote {
+                anyhow::anyhow!("Could not download and prepare image layers for {}. {error}", job.platform)
+            } else {
+                error
+            }
+        })?;
         staged
     };
 

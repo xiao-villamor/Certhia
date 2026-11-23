@@ -454,13 +454,13 @@ fn inspect_layer(dir: TempDir, index: usize) -> ApiResult<Value> {
     Ok(json!({"index":index,"files":files,"uncompressedBytes":bytes,"truncated":truncated}))
 }
 
-pub async fn pin(
+async fn inspect_registry(
     reference: &ImageReference,
     platform: &str,
     auth: Option<Credentials>,
     insecure: bool,
-) -> Result<String> {
-    use sha2::{Digest, Sha256};
+    config: bool,
+) -> Result<Vec<u8>> {
     let dir = tempfile::tempdir()?;
     let file = dir.path().join("auth.json");
     let auth = crate::registries::pull_credentials(&reference.host, auth).await?;
@@ -474,9 +474,49 @@ pub async fn pin(
     if insecure {
         command.arg("--tls-verify=false");
     }
+    if config {
+        command.arg("--config");
+    }
     command.arg(format!("docker://{}", reference.value));
-    let output = run(command, "Skopeo", Duration::from_secs(30)).await?;
-    let manifest: Value = serde_json::from_slice(&output.stdout)?;
+    Ok(run(command, "Skopeo", Duration::from_secs(30)).await?.stdout)
+}
+
+pub async fn verify_access(
+    reference: &ImageReference,
+    platform: &str,
+    auth: Option<Credentials>,
+    insecure: bool,
+) -> Result<()> {
+    let bytes = inspect_registry(reference, platform, auth, insecure, true)
+        .await
+        .map_err(|error| anyhow!("Could not read the image configuration for {platform}. {error}"))?;
+    let config: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| anyhow!("The registry did not return a valid image configuration."))?;
+    let mut parts = platform.split('/');
+    let os = parts.next();
+    let architecture = parts.next();
+    let variant = parts.next();
+    if config["os"].as_str() != os
+        || config["architecture"].as_str() != architecture
+        || matches!((variant, config["variant"].as_str()), (Some(expected), Some(actual)) if expected != actual)
+    {
+        bail!("The image configuration does not match {platform}. Choose a platform available for this image.");
+    }
+    Ok(())
+}
+
+pub async fn pin(
+    reference: &ImageReference,
+    platform: &str,
+    auth: Option<Credentials>,
+    insecure: bool,
+) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let bytes = inspect_registry(reference, platform, auth, insecure, false)
+        .await
+        .map_err(|error| anyhow!("Could not resolve the image manifest for {platform}. {error}"))?;
+    let manifest: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| anyhow!("The registry did not return a valid image manifest."))?;
     if manifest["schemaVersion"] != 2 {
         bail!("The registry did not return an image manifest.");
     }
@@ -504,7 +544,7 @@ pub async fn pin(
         {
             use std::fmt::Write;
             let mut value = String::from("sha256:");
-            for byte in Sha256::digest(&output.stdout) {
+            for byte in Sha256::digest(&bytes) {
                 write!(value, "{byte:02x}").expect("infallible write to String");
             }
             value
