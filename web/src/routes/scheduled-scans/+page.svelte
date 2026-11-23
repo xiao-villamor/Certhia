@@ -9,7 +9,7 @@
 
   type Mode = 'specific' | 'pattern' | 'all' | 'kubernetes';
   interface Schedule { id:string; name:string; reference:string; platform:string; registryId:string|null; expression:string; enabled:boolean; dueAt:string; mode:Mode; references:string[]; imagePattern:string; tagPattern:string; excludeTagPattern:string; retainSbom:boolean; kubernetesNamespace?:string; }
-  interface History { id:string; name:string; scanId:string|null; createdAt:string; trigger:string; status:string; }
+  interface History { id:string; name:string; scanId:string|null; createdAt:string; trigger:string; status:string; error?:string | null; }
   const initial = { name:'', reference:'', platform:'linux/amd64', registryId:'', expression:'0 3 * * *', enabled:true, mode:'specific' as Mode, imagePattern:'', tagPattern:'', excludeTagPattern:'', retainSbom:false, kubernetesNamespace:'' };
   let saved = $state<Schedule[]>([]);
   let history = $state<History[]>([]);
@@ -23,6 +23,43 @@
   let formIssue = $state('');
   let notice = $state('');
   let recent = $state('');
+  let cronInput = $state<HTMLInputElement>();
+  let cronIssue = $state('');
+  let preview = $state('');
+  let kubeIssue = $state<string | null>();
+  let connectionAttempt = $state(0);
+  const presets = [
+    ['0 * * * *', 'Hourly'],
+    ['0 3 * * *', 'Daily at 03:00 UTC'],
+    ['0 3 * * 1', 'Mondays at 03:00 UTC']
+  ];
+
+  $effect(() => {
+    if (!open) return;
+    const expression = form.expression;
+    const controller = new AbortController();
+    preview = ''; cronIssue = '';
+    const timer = setTimeout(() => {
+      void api<{dueAt:string}>('/scheduled-scans/preview?' + new URLSearchParams({expression}), {signal: controller.signal})
+        .then(result => { if (!controller.signal.aborted) preview = result.dueAt; })
+        .catch(error => { if (!controller.signal.aborted) cronIssue = message(error); });
+    }, 300);
+    return () => {clearTimeout(timer); controller.abort();};
+  });
+
+  $effect(() => {
+    if (!open || form.mode !== 'kubernetes') return;
+    void connectionAttempt;
+    const namespace = form.kubernetesNamespace.trim();
+    const controller = new AbortController();
+    kubeIssue = undefined;
+    const timer = setTimeout(() => {
+      void api('/scheduled-scans/kubernetes?' + new URLSearchParams({namespace}), {signal: controller.signal})
+        .then(() => { if (!controller.signal.aborted) kubeIssue = null; })
+        .catch(error => { if (!controller.signal.aborted) kubeIssue = message(error); });
+    }, 300);
+    return () => {clearTimeout(timer); controller.abort();};
+  });
 
   let nextSchedules=$state<string|null>(null);
   let nextHistory=$state<string|null>(null);
@@ -62,13 +99,25 @@
   async function save(event: SubmitEvent) {
     event.preventDefault();
     if (busy) return;
+    if (cronIssue || form.expression.trim().split(/\s+/).length !== 5) {
+      cronIssue ||= 'Enter a five-field UTC cron expression.';
+      cronInput?.focus();
+      return;
+    }
+    if (form.mode === 'kubernetes' && form.enabled && kubeIssue !== null) {
+      formIssue = 'Verify the Kubernetes connection or save this schedule disabled.';
+      return;
+    }
     busy = true; formIssue = '';
     try {
       await api('/scheduled-scans' + (id ? '/' + id : ''), {...post({...form, references:form.mode === 'specific' ? form.reference.split(/\r?\n/).map(value => value.trim()).filter(Boolean) : [], registryId:form.registryId || null}), method:id ? 'PUT' : 'POST'});
       open = false;
       await refresh();
       notice = 'Schedule saved.';
-    } catch (error) {formIssue = message(error);}
+    } catch (error) {
+      formIssue = message(error);
+      if (/cron expression|future runs/i.test(formIssue)) {cronIssue = formIssue; formIssue = ''; cronInput?.focus();}
+    }
     finally {busy = false;}
   }
   async function run(item: Schedule) {
@@ -78,7 +127,7 @@
       recent = result.scanIds.length === 1 ? (result.id ?? '') : '';
       notice = result.scanIds.length ? `${result.scanIds.length} scan${result.scanIds.length === 1 ? '' : 's'} queued.` : item.mode === 'kubernetes' ? 'No new runtime image digests were observed.' : 'No tracked images matched this schedule.';
       await refresh();
-    } catch (error) {issue = message(error);}
+    } catch (error) {await refresh(); issue = message(error);}
     finally {busy = false;}
   }
   async function toggle(item: Schedule) {
@@ -108,7 +157,10 @@
   dismiss={() => {open = false;}} onsubmit={save}>
     <div class="form-grid">
     <label class="field"><span>Name</span><input required maxlength="100" bind:value={form.name} /></label>
-    <label class="field"><span>Image selection</span><select bind:value={form.mode}><option value="specific">Specific images</option><option value="pattern">Match images and tags</option><option value="all">All tracked images</option><option value="kubernetes">Kubernetes digest changes</option></select></label>
+    <label class="field"><span>Image selection</span><select bind:value={form.mode}
+      onchange={(event) => { if (event.currentTarget.value === 'kubernetes') form.enabled = false; }}>
+      <option value="specific">Specific images</option><option value="pattern">Match images and tags</option><option value="all">All tracked images</option><option value="kubernetes">Kubernetes digest changes</option>
+    </select></label>
     </div>
     {#if form.mode === 'specific'}
     <label class="field"><span>Image references</span><textarea required class="mono" rows="3" bind:value={form.reference} placeholder="registry.example.com/team/image:tag"></textarea><small>Enter one reference per line.</small></label>
@@ -121,6 +173,15 @@
     <label class="field"><span>Namespace</span><input bind:value={form.kubernetesNamespace} maxlength="63" placeholder="All namespaces" />
       <small>Enter a namespace if the Kubernetes connection has namespace-only permissions.</small>
     </label>
+    {#if kubeIssue === undefined}
+      <p class="field-help" role="status">Checking Kubernetes pod access…</p>
+    {:else if kubeIssue}
+      <div class="notice warning" role="status">{kubeIssue} You can save a disabled draft.
+        <button type="button" class="text-button" onclick={() => connectionAttempt++}>Check again</button>
+      </div>
+    {:else}
+      <p class="field-help" role="status">Kubernetes pod access verified.</p>
+    {/if}
     <div class="form-grid">
       <label class="field"><span>Platform</span><select bind:value={form.platform}>{#each platforms as value}<option>{value}</option>{/each}</select></label>
       <label class="field"><span>Registry connection</span><select bind:value={form.registryId}><option value="">Public registries</option>
@@ -134,8 +195,21 @@
       <label class="field"><span>Exclude tags</span><input bind:value={form.excludeTagPattern} maxlength="250" placeholder="^(dev|test)$" /></label>
     </div>
     {/if}
-    <label class="field"><span>UTC cron expression</span><input required class="mono" maxlength="120" bind:value={form.expression} /><small>For example, 0 3 * * * runs daily at 03:00 UTC.</small></label>
-    <label class="inline-check"><input type="checkbox" bind:checked={form.enabled} /> Enable schedule</label>
+    <div class="form-grid">
+      <label class="field"><span>Schedule preset</span><select value={presets.some(([value]) => value === form.expression) ? form.expression : ''}
+        onchange={(event) => {if (event.currentTarget.value) form.expression = event.currentTarget.value; else cronInput?.focus();}}>
+        <option value="">Custom schedule</option>
+        {#each presets as [value, label]}<option {value}>{label}</option>{/each}
+      </select></label>
+      <label class="field"><span>UTC cron expression</span><input required class="mono" maxlength="120"
+        bind:this={cronInput} bind:value={form.expression} aria-invalid={!!cronIssue || undefined} aria-describedby="schedule-cron-description"
+        oninvalid={() => {cronIssue ||= 'Enter a five-field UTC cron expression.';}} />
+        <small id="schedule-cron-description" role={cronIssue ? 'alert' : undefined}>{cronIssue || 'For example, 0 3 * * * runs daily at 03:00 UTC.'}</small>
+      </label>
+    </div>
+    {#if preview}<p class="field-help" role="status">Next run in your time zone · {time(preview)}</p>{/if}
+    <label class="inline-check"><input type="checkbox" bind:checked={form.enabled}
+      disabled={form.mode === 'kubernetes' && kubeIssue !== null && !form.enabled} /> Enable schedule</label>
     <label class="inline-check"><input type="checkbox" bind:checked={form.retainSbom} /> Retain a CycloneDX SBOM for each scan with package inventory</label>
     {#if formIssue}<div class="notice error" role="alert">{formIssue}</div>{/if}
     {#snippet actions()}
@@ -162,7 +236,9 @@
 <section class="panel"><div class="panel-title"><h2>Execution history</h2></div>
   <div class="table-wrap"><table><thead><tr><th>Schedule</th><th>Trigger</th><th>Status</th><th>Queued</th></tr></thead>
     <tbody>{#each history as run (run.id + (run.scanId ?? ''))}<tr><td>{run.name}</td><td>{run.trigger}</td>
-      <td>{#if run.status === 'removed'}Removed{:else if run.status === 'no_matches'}No images queued{:else}<a class="table-link" href={'/scans/' + run.scanId}>{run.status}</a>{/if}</td><td>{time(run.createdAt)}</td></tr>
+      <td>{#if run.status === 'removed'}Removed{:else if run.status === 'no_matches'}No images queued
+        {:else if run.scanId}<a class="table-link" href={'/scans/' + run.scanId}>{run.status}</a>{:else}Failed{/if}
+        {#if run.error}<small>{run.error}</small>{/if}</td><td>{time(run.createdAt)}</td></tr>
       {:else}<tr><td colspan="4">No scheduled runs yet.</td></tr>{/each}</tbody></table></div>
 {#if nextHistory}<button class="button secondary" onclick={moreHistory}>Load more runs</button>{/if}
 </section>

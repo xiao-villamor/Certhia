@@ -26,6 +26,7 @@ import zipfile
 
 HERE = Path(__file__).resolve().parent
 PROJECT = Path(os.environ.get('CERTHIA_PROJECT', '.')).resolve()
+WEB = Path(os.environ.get('CERTHIA_WEB_DIR', PROJECT / 'web/build')).resolve()
 TEST_IMAGE = 'example.test/team/app:v1'
 FINDINGS = ('CVE-2099-0001', 'CVE-2099-0002')
 
@@ -204,6 +205,12 @@ def test_discovery(api, docker, tmp, database_container):
     expect([])
     write_pods(tmp, [], malformed=True)
     assert 'pod list' in api.read(path + '/execute', {}, status=400)['error']
+    failure = next(run for run in api.read('/scheduled-scans/history') if run['name'] == form['name'])
+    assert failure['status'] == 'failed' and failure['scanId'] is None and 'pod list' in failure['error']
+    api.read('/scheduled-scans/kubernetes?namespace=prod', status=400)
+    api.read(path, {**form, 'enabled': True}, method='PUT', status=400)
+    assert api.read('/scheduled-scans/preview?' + urllib.parse.urlencode({'expression': '0 3 * * *'}))['dueAt']
+    api.read('/scheduled-scans/preview?expression=daily', status=400)
     write_pods(tmp, [None, 'a'])
     expect([])
     write_pods(tmp, ['a', 'b'])
@@ -256,14 +263,14 @@ def test_registries(api, gitea):
     print('PASS Gitea protocol fixture: authenticated catalog, tags, denied catalog/tags; Gitea and GAR profiles: queue exact tag and digest', flush=True)
 
 
-def import_report(api, reference=TEST_IMAGE, platform='linux/amd64', digest='a', extra_package=False):
+def import_report(api, reference=TEST_IMAGE, platform='linux/amd64', digest='a', extra_package=False, title='Test finding'):
     repo = reference.rsplit(':', 1)[0]
     report = {'SchemaVersion': 2, 'ArtifactType': 'container_image',
               'Metadata': {'RepoDigests': [repo + '@sha256:' + digest * 64]},
               'Results': [{'Class': 'os-pkgs', 'Type': 'alpine', 'Target': 'fixture',
                            'Packages': [{'Name': 'demo-package', 'Version': '1.2.3'}],
                            'Vulnerabilities': [{'VulnerabilityID': cve, 'PkgName': 'demo-package', 'InstalledVersion': '1.2.3',
-                                                'FixedVersion': '1.2.4', 'Severity': 'HIGH', 'Title': 'Test finding'} for cve in FINDINGS]}]}
+                                                'FixedVersion': '1.2.4', 'Severity': 'HIGH', 'Title': title} for cve in FINDINGS]}]}
     if extra_package:
         result = report['Results'][0]
         result['Packages'].append({'Name': 'demo-runtime', 'Version': '1.2.3'})
@@ -641,6 +648,41 @@ done
     print('PASS GitHub Action and CI API: poll a digest scan, report deduplicated fixes, enforce the gate and protect results across profiles', flush=True)
 
 
+def test_ux_fixes(api, tmp, email, password):
+    baseline = import_report(api, reference='example.test/two/build:v1', digest='a')
+    target = import_report(api, reference='example.test/two/build:v2', digest='b', extra_package=True,
+                           title='Issue summary: ' + ('A long provider description belongs in finding details. ' * 25) + 'End of scanner description.')
+    tracker = api.read('/settings/issue-trackers', {'name':'Comparison Jira', 'provider':'jira',
+        'urlTemplate':'https://issues.example.test/(security)/{id}'}, status=201)
+    for scan, finding, scope, key in [(baseline, FINDINGS[0], 'image', 'CMP-101'),
+                                      (target, FINDINGS[0], 'image', 'CMP-102'),
+                                      (target, FINDINGS[1], 'advisory', 'CMP-103')]:
+        api.call('/scans/' + scan + '/classifications', {'finding':finding, 'status':'open',
+            'issueScope':scope, 'issue':{'trackerId':tracker['id'], 'key':key}}, method='PUT', status=204)
+    mixed = api.read('/scans/import?reference=example.test/team/mixed:v1&platform=linux/amd64', {
+        'SchemaVersion':2, 'ArtifactType':'container_image', 'Results':[
+            {'Class':'os-pkgs', 'Type':'alpine', 'Target':'os', 'Vulnerabilities':[
+                {'VulnerabilityID':f'CVE-2099-{3000 + i}', 'PkgName':'system-test', 'InstalledVersion':'1.0',
+                 'Severity':'HIGH'} for i in range(101)]},
+            {'Class':'lang-pkgs', 'Type':'jar', 'Target':'app.jar', 'Vulnerabilities':[
+                {'VulnerabilityID':'CVE-2099-4242', 'PkgName':'org.example:java-test', 'InstalledVersion':'1.0.0',
+                 'FixedVersion':'1.1.0', 'Severity':'HIGH'}]},
+        ]}, status=201)['id']
+    profile = api.read('/registries', {'name':'Recovery test registry', 'host':'recovery.example.test'}, status=201)
+    failed = api.read('/scans', {'reference':'team/fails:v1', 'platform':'linux/arm64',
+                                'registryId':profile['id'], 'priority':-3}, status=202)['id']
+    deadline = time.monotonic() + 25
+    while api.read('/scans/' + failed)['status'] != 'failed':
+        assert time.monotonic() < deadline, 'Expected the recovery fixture to fail'
+        time.sleep(.25)
+    archive = tmp / 'ux.tar'
+    archive.write_bytes(image_archive('demo', '1.0'))
+    subprocess.run(['node', str(HERE / 'ux-regressions.cjs'), api.origin, baseline, target, failed, str(archive), mixed],
+        env={**os.environ, 'CERTHIA_TEST_EMAIL':email, 'CERTHIA_TEST_PASSWORD':password}, check=True)
+    api.call('/scans/' + target + '/classifications', {'finding':FINDINGS[1], 'status':'open',
+        'issueScope':'advisory', 'issue':None}, method='PUT', status=204)
+
+
 def test_vulnerability_comparison(api, binary, bindir, tmp, email, password):
     cve, ghsa = 'CVE-2099-0002', 'GHSA-2345-6789-cfgh'
     purl = 'pkg:npm/example@1.0.0'
@@ -652,6 +694,31 @@ def test_vulnerability_comparison(api, binary, bindir, tmp, email, password):
             'vulnerability':{'id':cve,'severity':'Critical','fix':{'versions':['1.1.0']}}}]},
         'osv': json.loads((PROJECT / 'backend/src/fixtures/scanners/osv.json').read_text().replace('GHSA-fixture', ghsa))
     }
+    raw['trivy']['Results'][0]['Vulnerabilities'].append({
+        'VulnerabilityID':'CVE-2099-9988', 'PkgName':'trivy-only', 'InstalledVersion':'2.0',
+        'FixedVersion':'2.1', 'Severity':'HIGH', 'PkgIdentifier':{'PURL':'pkg:npm/trivy-only@2.0'},
+    })
+    for index in range(12):
+        raw['trivy']['Results'][0]['Vulnerabilities'].append({
+            'VulnerabilityID':f'CVE-2099-{9900 + index}', 'PkgName':f'extra-{index}', 'InstalledVersion':'1.0',
+            'Severity':'MEDIUM', 'PkgIdentifier':{'PURL':f'pkg:npm/extra-{index}@1.0'},
+        })
+    rating_cve, rating_purl = 'CVE-2099-9999', 'pkg:npm/severity-demo@2.0.0'
+    raw['trivy']['Results'][0]['Vulnerabilities'].append({
+        'VulnerabilityID':rating_cve, 'PkgName':'severity-demo', 'InstalledVersion':'2.0.0',
+        'FixedVersion':'2.1.0', 'Severity':'MEDIUM', 'PkgIdentifier':{'PURL':rating_purl},
+    })
+    raw['grype']['matches'].append({
+        'artifact':{'name':'severity-demo','version':'2.0.0','type':'npm','purl':rating_purl},
+        'vulnerability':{'id':rating_cve,'severity':'Critical','fix':{'versions':['2.1.0']}}
+    })
+    raw['osv']['results'][0]['packages'].append({
+        'package':{'name':'severity-demo','version':'2.0.0','ecosystem':'npm','purl':rating_purl},
+        'groups':[{'ids':[rating_cve],'aliases':[rating_cve],'max_severity':'8.1'}],
+        'vulnerabilities':[{'id':rating_cve, 'affected':[
+            {'package':{'name':'severity-demo','ecosystem':'npm'}, 'ranges':[
+                {'type':'SEMVER','events':[{'introduced':'0'},{'fixed':'2.1.0'}]}]}]}],
+    })
     executables = []
     try:
         for engine, name, flag in [('trivy','trivy','--output'),('grype','grype','--file'),('osv','osv-scanner','--output-file')]:
@@ -663,14 +730,16 @@ def test_vulnerability_comparison(api, binary, bindir, tmp, email, password):
                 '  shift\ndone\nexit 2\n')
             executable.chmod(0o700)
             executables.append(executable)
+        scans = {}
         for engines in [['trivy','grype','osv'],['trivy','osv'],['grype','osv']]:
             shown = ['trivy','grype','osv']
             enabled = [engine for engine in shown if engine in engines]
             path = scan_archive(api, image_archive('test', '1.0.0'), 'certhia/compare:test', enabled)
+            scans[tuple(engines)] = path.rsplit('/', 1)[1]
             result = api.read(path + '/report/discrepancies')
             assert result['scanners'] == enabled
-            assert (result['autoResolved'], result['needsReview']) == (1,0), result
-            assert result['differences'][0]['osv']['advisory'] == ghsa
+            assert (result['autoResolved'], result['needsReview']) == (1,1 + 13 * int('trivy' in enabled)), result
+            assert next(row for row in result['differences'] if row['status'] == 'auto_resolved')['osv']['advisory'] == ghsa
             assert set(api.read(path + '/scanner-results')['scanners']) == set(engines)
             with zipfile.ZipFile(io.BytesIO(api.read(path + '/report/zip', raw=True))) as report:
                 assert json.loads(report.read('discrepancies.json')) == result
@@ -681,6 +750,60 @@ def test_vulnerability_comparison(api, binary, bindir, tmp, email, password):
                 subprocess.run(['node',str(HERE / 'provider-report.cjs'),api.origin,path.rsplit('/',1)[1],'osv'],
                     env={**os.environ,'CERTHIA_TEST_EMAIL':email,'CERTHIA_TEST_PASSWORD':password},check=True)
         print('PASS completed comparison with OSV-Scanner in API, ZIP and CLI (scanner report fixtures)', flush=True)
+
+        def scan_id(version, engines):
+            return scan_archive(api, image_archive('mixed-scanners', version),
+                                'certhia/mixed-scanners:' + version, engines).rsplit('/', 1)[1]
+
+        def compare(earlier, newer):
+            return api.read('/compare?' + urllib.parse.urlencode({'baseline':earlier, 'target':newer}))
+
+        osv_comparison = compare(scans['trivy', 'osv'], scans['grype', 'osv'])
+        assert osv_comparison['scanners'] == ['osv']
+        assert osv_comparison['changes']['observations']
+        assert all(row['status'] == 'Still detected' for row in osv_comparison['changes']['observations'])
+
+        trivy_result = raw['trivy']['Results'][0]
+        trivy_result['Packages'] = [{'Name':'example', 'Version':'1.0.0'}]
+        (tmp / 'trivy.json').write_text(json.dumps(raw['trivy']))
+        baseline = scan_id('1.0.0', ['trivy', 'osv'])
+        trivy_result['Packages'][0]['Version'] = '2.0.0'
+        (tmp / 'trivy.json').write_text(json.dumps(raw['trivy']))
+        # A scanner added to the newer scan must not alter the apparent detections or severity.
+        grype_only = 'CVE-2099-7766'
+        raw['grype']['matches'].append({
+            'artifact':{'name':'example','version':'1.0.0','type':'npm','purl':purl},
+            'vulnerability':{'id':grype_only,'severity':'Critical'},
+        })
+        (tmp / 'grype.json').write_text(json.dumps(raw['grype']))
+        target = scan_id('2.0.0', ['trivy', 'grype'])
+        assert api.read('/scans/' + target + '/previous-version')['id'] == baseline
+        result = compare(baseline, target)
+        assert result['scanners'] == ['trivy']
+        assert result['baselineScanners'] == ['osv', 'trivy'] and result['targetScanners'] == ['grype', 'trivy']
+        assert {'name':'example', 'ecosystem':'node-pkg', 'status':'Changed', 'before':['1.0.0'], 'after':['2.0.0']} in result['changes']['packages']
+        observations = result['changes']['observations']
+        assert observations and all(row['status'] == 'Still detected' for row in observations)
+        assert all(row['advisory'] != grype_only for row in observations)
+        assert next(row for row in observations if row['advisory'] == rating_cve)['severity'] == 'MEDIUM'
+
+        syft = bindir / 'syft'
+        syft.write_text('''#!/bin/sh
+for arg in "$@"; do
+    case "$arg" in
+        syft-json=*) printf '%s\n' '{"artifacts":[{"name":"example","version":"3.0.0","type":"npm"}]}' > "${arg#*=}" ;;
+        cyclonedx-json=*) printf '%s\n' '{"bomFormat":"CycloneDX","specVersion":"1.6","components":[]}' > "${arg#*=}" ;;
+    esac
+done
+''')
+        syft.chmod(0o700)
+        executables.append(syft)
+        disjoint = scan_id('3.0.0', ['grype', 'syft'])
+        result = compare(baseline, disjoint)
+        assert result['scanners'] == [] and result['targetScanners'] == ['grype']
+        assert result['changes']['observations'] == []
+        assert result['changes']['inventoryAvailable'] and result['changes']['packages']
+        print('PASS release comparison with overlapping and disjoint scanners', flush=True)
     finally:
         for executable in executables:
             executable.unlink()
@@ -688,7 +811,7 @@ def test_vulnerability_comparison(api, binary, bindir, tmp, email, password):
 
 def main():
     binary = Path(os.environ.get('CERTHIA_BINARY', PROJECT / 'backend/target/debug/digestdesk')).resolve()
-    if not binary.is_file() or not (PROJECT / 'web/build/200.html').is_file():
+    if not binary.is_file() or not (WEB / '200.html').is_file():
         raise RuntimeError('Build the Rust binary and web UI first; run from the checkout or set CERTHIA_PROJECT')
     subprocess.run(['node', str(HERE / 'browser-flows.cjs')], check=True)
     with tempfile.TemporaryDirectory(prefix='certhia-check-', dir=os.environ.get('CERTHIA_TEST_TMP')) as directory, contextlib.ExitStack() as stack:
@@ -718,7 +841,7 @@ def main():
         email, password = 'ux@example.test', secrets.token_urlsafe(32)
         env = {'PATH': str(bindir), 'DATABASE_URL': database, 'CERTHIA_ADMIN_EMAIL': email,
                'CERTHIA_ADMIN_PASSWORD': password, 'CERTHIA_AUTH_SECURE_COOKIE': '0', 'CERTHIA_BIND': bind,
-               'CERTHIA_WEB_DIR': str(PROJECT / 'web/build'), 'CERTHIA_DATA_DIR': str(tmp / 'data'),
+               'CERTHIA_WEB_DIR': str(WEB), 'CERTHIA_DATA_DIR': str(tmp / 'data'),
                'KUBECONFIG': str(tmp / 'isolated-kubeconfig'), 'CERTHIA_DOCKER_SOCKET': socket_path}
         if seeds:
             env.update(TRIVY_SKIP_DB_UPDATE='true', TRIVY_SKIP_JAVA_DB_UPDATE='true',
@@ -748,6 +871,7 @@ def main():
             test_shared_ticket(api, email, password)
             test_exceptions(api, email, password)
             test_ci_scan(api, bindir, tmp)
+            test_ux_fixes(api, tmp, email, password)
             test_vulnerability_comparison(api, binary, bindir, tmp, email, password)
             for tool, executable in binaries.items():
                 if executable:

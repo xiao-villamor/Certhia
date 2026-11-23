@@ -90,11 +90,6 @@
   </div>
 </div>
 
-<section class="panel advisory-panel" aria-labelledby="advisory-overview">
-  <div class="panel-title"><div><h2 id="advisory-overview">Advisory</h2><p>Scores and references recorded by the scanner</p></div></div>
-  <div class="advisory-body"><AdvisoryDetails id={page.params.id ?? ''} /></div>
-</section>
-
 {#if error}<div class="notice error" role="alert">{error} <button class="text-button" onclick={() => {retry += 1;}}>Retry</button></div>{/if}
 {#if notice}<div class="notice success" role="status">{notice}</div>{/if}
 {#if loading}<div class="panel empty" role="status">Loading affected images…</div>
@@ -150,6 +145,11 @@
     {/if}
   </section>
 {/if}
+
+<section class="panel advisory-panel" aria-labelledby="advisory-overview">
+  <div class="panel-title"><div><h2 id="advisory-overview">Advisory</h2><p>Scores and references recorded by the scanner</p></div></div>
+  <div class="advisory-body"><AdvisoryDetails id={page.params.id ?? ''} compact /></div>
+</section>
 
 <style>
   .advisory-body { padding: 1rem 1.15rem 1.15rem; }

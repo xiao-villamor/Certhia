@@ -71,15 +71,23 @@ async fn analyze(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Js
         .await?
         .ok_or_else(|| ApiError::bad("Patch analysis requires a raw Trivy report."))?;
     let items = candidates(&raw)?;
-    let available = detail
+    let mut blockers = Vec::new();
+    if detail
         .report
         .as_ref()
         .and_then(|report| report.digest.as_deref())
-        .is_some()
-        && buildkit_address().is_some()
-        && !matches!(detail.scan.source.as_str(), "docker" | "archive");
+        .is_none()
+    {
+        blockers.push("This report has no recorded image digest.");
+    }
+    if buildkit_address().is_none() {
+        blockers.push("The workspace has no configured BuildKit worker.");
+    }
+    if matches!(detail.scan.source.as_str(), "docker" | "archive") {
+        blockers.push("Choose a report for an image that can be pulled from a registry.");
+    }
     Ok(Json(
-        json!({"image":detail.scan.reference,"packages":items,"canBuild":available}),
+        json!({"image":detail.scan.reference,"packages":items,"canBuild":blockers.is_empty(),"buildBlockers":blockers}),
     ))
 }
 

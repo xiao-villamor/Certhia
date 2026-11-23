@@ -157,7 +157,7 @@ async fn finding_sources(
     Ok(Json(detections(&app, &id, &job.source).await?))
 }
 
-async fn detections(app: &App, id: &str, source: &str) -> Result<Vec<Detection>> {
+pub(crate) async fn detections(app: &App, id: &str, source: &str) -> Result<Vec<Detection>> {
     let stored = report(app, id, FINDING_SOURCES).await?;
     if let Some(bytes) = &stored
         && let Some(mut rows) = serde_json::from_slice::<Option<Vec<Detection>>>(bytes)?
@@ -319,7 +319,7 @@ pub async fn trivy(app: &App, id: &str) -> Result<Option<Vec<u8>>> {
         None => Ok(None),
     }
 }
-async fn report(app: &App, id: &str, kind: &str) -> Result<Option<Vec<u8>>> {
+pub(crate) async fn report(app: &App, id: &str, kind: &str) -> Result<Option<Vec<u8>>> {
     let row = sqlx::query!(
         "SELECT object_key,owned FROM artifact_refs WHERE scan_id=$1 AND kind=$2",
         uuid::Uuid::parse_str(id)?,
@@ -390,9 +390,13 @@ async fn download(
     {
         return Err(ApiError::missing("Unknown scanner."));
     }
-    if app.0.database.replay(&id).await?.is_none() {
-        return Err(ApiError::missing("Scan not found."));
-    }
+    let scan = app
+        .0
+        .database
+        .replay(&id)
+        .await?
+        .ok_or_else(|| ApiError::missing("Scan not found."))?;
+    let filename = crate::exports::scan_filename(&scan.reference, &scan.platform, &id);
     let bytes = if tool == "trivy" {
         trivy(&app, &id).await?
     } else {
@@ -401,7 +405,7 @@ async fn download(
     .ok_or_else(|| ApiError::missing("Scanner report unavailable."))?;
     if tool == crate::exports::SCHEDULED_SBOM {
         return Ok(crate::exports::attachment(
-            &id,
+            &filename,
             "application/vnd.cyclonedx+json",
             "cdx.json",
             bytes,
@@ -415,7 +419,7 @@ async fn download(
             ),
             (
                 axum::http::header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{tool}.json\""),
+                format!("attachment; filename=\"{filename}.{tool}.json\""),
             ),
         ],
         bytes,

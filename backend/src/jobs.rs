@@ -268,9 +268,20 @@ async fn summary(app: &App, id: &str) -> ApiResult<Value> {
         .into_iter()
         .map(|r| json!({"step":r.step,"title":r.title,"detail":r.detail,"at":r.at}))
         .collect();
+    let heartbeat = if row.status == "running" {
+        sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
+            "SELECT lease_until - interval '60 seconds' FROM scan_jobs WHERE scan_id=$1",
+        )
+        .bind(key)
+        .fetch_optional(&app.0.database.primary)
+        .await?
+        .flatten()
+    } else {
+        None
+    };
     Ok(
         json!({"id":id,"status":row.status,"error":row.error,"queuePosition":row.position,
-        "progress":match row.status.as_str(){"queued"=>0,"running"=>25,_=>100},"startedAt":row.started_at,"activity":activity}),
+        "progress":match row.status.as_str(){"queued"=>0,"running"=>25,_=>100},"startedAt":row.started_at,"workerHeartbeatAt":heartbeat,"activity":activity}),
     )
 }
 async fn progress(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
@@ -302,6 +313,7 @@ async fn events(
                                 if !session.is_active(&app.0.database.primary).await.unwrap_or(false) {
                                     return None;
                                 }
+                                break;
                             }
                             event = rx.recv() => match event {
                                 Ok(key) if key == id || key.is_empty() => break,

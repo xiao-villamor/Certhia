@@ -85,6 +85,14 @@ impl Database {
         }))
     }
     pub async fn scan(&self, id: &str) -> Result<Option<ScanDetail>> {
+        self.load_scan(id, true).await
+    }
+
+    pub async fn scan_summary(&self, id: &str) -> Result<Option<ScanDetail>> {
+        self.load_scan(id, false).await
+    }
+
+    async fn load_scan(&self, id: &str, include_findings: bool) -> Result<Option<ScanDetail>> {
         let Ok(id) = Uuid::parse_str(id) else {
             return Ok(None);
         };
@@ -115,12 +123,16 @@ impl Database {
         let packages=sqlx::query_as!(Package,"SELECT DISTINCT e.name AS ecosystem,p.name,p.version,p.purl,nullif(dp.layer_index,-1) AS layer_index FROM digest_packages dp
             JOIN packages p ON p.id=dp.package_id JOIN ecosystems e ON e.id=p.ecosystem_id WHERE dp.digest_id=$1
             ORDER BY ecosystem,p.name,p.version",manifest).fetch_all(&mut *tx).await?;
-        let findings=sqlx::query_as::<_, Finding>("SELECT a.external_id AS id,e.name AS ecosystem,p.name AS package,p.version AS installed,p.purl,
+        let findings = if include_findings {
+            sqlx::query_as::<_, Finding>("SELECT a.external_id AS id,e.name AS ecosystem,p.name AS package,p.version AS installed,p.purl,
             coalesce(v.version,'') AS fixed,upper(s.name) AS severity,coalesce(k.title,'') AS title
             FROM observed_findings($1,$2,$3,$4) k JOIN packages p ON p.id=k.package_id JOIN ecosystems e ON e.id=p.ecosystem_id
             JOIN advisories a ON a.id=k.advisory_id JOIN severities s ON s.id=k.severity_id
             LEFT JOIN fix_versions v ON v.id=k.fixed_in ORDER BY a.external_id,p.name")
-            .bind(manifest).bind(observed_order).bind(scan_no).bind(complete.is_some()).fetch_all(&mut *tx).await?;
+            .bind(manifest).bind(observed_order).bind(scan_no).bind(complete.is_some()).fetch_all(&mut *tx).await?
+        } else {
+            Vec::new()
+        };
         let checks=sqlx::query_as!(Check,"SELECT category,external_id AS id,target,severity,title,detail FROM scan_checks WHERE scan_id=$1 ORDER BY ordinal",id)
             .fetch_all(&mut *tx).await?;
         tx.commit().await?;

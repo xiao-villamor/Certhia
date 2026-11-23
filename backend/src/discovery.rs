@@ -196,10 +196,7 @@ async fn kubernetes(Query(input): Query<Namespace>) -> ApiResult<Json<Value>> {
 }
 
 async fn kubernetes_images(namespace: Option<&str>) -> ApiResult<Vec<PodImage>> {
-    let pods = kube_list(namespaced_command("pods", namespace)?).await?;
-    if !pods["items"].is_array() {
-        return Err(ApiError::bad("Kubernetes did not return a pod list."));
-    }
+    let pods = kube_pods(namespace).await?;
     let controller_kinds = items(&pods)
         .filter_map(controller)
         .filter_map(|owner| owner["kind"].as_str())
@@ -213,6 +210,14 @@ async fn kubernetes_images(namespace: Option<&str>) -> ApiResult<Vec<PodImage>> 
         list_owners("jobs.batch", namespace, controller_kinds.contains("Job")),
     );
     Ok(pod_images(&pods, &[replica_sets, jobs]))
+}
+
+pub async fn kube_pods(namespace: Option<&str>) -> ApiResult<Value> {
+    let pods = kube_list(namespaced_command("pods", namespace)?).await?;
+    if !pods["items"].is_array() {
+        return Err(ApiError::bad("Kubernetes did not return a pod list."));
+    }
+    Ok(pods)
 }
 
 pub type RuntimeImages = BTreeMap<String, BTreeSet<String>>;

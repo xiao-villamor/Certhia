@@ -4,6 +4,7 @@
   import { page } from '$app/state';
   import { auth, loadSession, returnPath } from '#lib/auth.svelte.js';
   import EntryShell from '#lib/EntryShell.svelte';
+  import ScannerInstallHelp from '#lib/ScannerInstallHelp.svelte';
   import { api, message, post, scannerProviders, type ScannerAvailability } from '#lib/api.js';
 
   const firstScan = $derived(page.url.searchParams.get('step') === 'scan' || !auth.admin);
@@ -79,6 +80,7 @@
       </fieldset>
       {#if missing.length}
         <p class="field-help">Not installed in this image: {missing.map(provider => provider.name).join(', ')}.</p>
+        <ScannerInstallHelp />
       {/if}
       {#if !selected.length}<p class="field-help">Trivy runs when no scanner is selected.</p>{/if}
       <div class="actions">

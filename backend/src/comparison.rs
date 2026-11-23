@@ -1,5 +1,8 @@
 use crate::{
-    ApiError, ApiResult, App, ImageReference, ImageTarget, ScanInput, image_target, images, jobs,
+    ApiError, ApiResult, App, ImageReference, ImageTarget, ScanInput,
+    discrepancies::SCANNERS,
+    domain::{Finding, Report, merge_findings},
+    image_target, images, jobs,
 };
 use axum::{
     Json, Router,
@@ -16,6 +19,7 @@ pub fn routes() -> Router<App> {
     Router::new()
         .route("/compare/plan", post(plan))
         .route("/scans/{id}/previous", get(previous))
+        .route("/scans/{id}/previous-version", get(previous_version))
 }
 
 #[derive(Deserialize)]
@@ -110,56 +114,142 @@ async fn previous(State(app): State<App>, Path(id): Path<Uuid>) -> ApiResult<Jso
     Ok(Json(json!({"id":previous})))
 }
 
-pub async fn report(
+async fn previous_version(State(app): State<App>, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
+    let suggested: Option<Uuid> = sqlx::query_scalar(
+        "SELECT s.id FROM scan_directory d JOIN scans current USING(id,queued_at)
+         JOIN scans s ON s.repository_id=current.repository_id AND s.platform=current.platform
+         WHERE d.id=$1 AND current.status='completed' AND s.status='completed'
+           AND (s.finished_at,s.id)<(current.finished_at,current.id)
+         ORDER BY (s.reference<>current.reference) DESC,
+           EXISTS (SELECT 1 FROM unnest($2::text[]) tool
+                   WHERE tool=ANY(string_to_array(s.scanner,', ')) AND tool=ANY(string_to_array(current.scanner,', '))) DESC,
+           s.finished_at DESC,s.id DESC LIMIT 1",
+    )
+    .bind(id)
+    .bind(&SCANNERS[..])
+    .fetch_optional(&app.0.database.primary)
+    .await?;
+    Ok(Json(json!({"id":suggested})))
+}
+
+pub fn engines(report: &Report, source: &str) -> Vec<&'static str> {
+    let mut tools: Vec<_> = SCANNERS
+        .into_iter()
+        .filter(|tool| report.scanners.iter().any(|recorded| recorded == tool))
+        .collect();
+    if tools.is_empty() && source == "import" {
+        tools.push("trivy");
+    }
+    tools.sort_unstable();
+    tools
+}
+
+pub async fn align_findings(
     app: &App,
-    detail: &crate::store::ScanDetail,
-    trivy_only: bool,
-) -> ApiResult<(crate::domain::Report, Vec<String>)> {
+    baseline: (&str, &mut Report, &[&'static str]),
+    target: (&str, &mut Report, &[&'static str]),
+) -> Vec<&'static str> {
+    let (before_id, before, before_tools) = baseline;
+    let (after_id, after, after_tools) = target;
+    if before_tools == after_tools
+        && !before_tools.is_empty()
+        && before.observation_complete == Some(true)
+        && after.observation_complete == Some(true)
+    {
+        return before_tools.to_vec();
+    }
+
+    let mut comparable = Vec::new();
+    let mut before_findings = Vec::new();
+    let mut after_findings = Vec::new();
+    // Merged findings may carry severity and fix data from an engine that only ran on one side.
+    for &tool in before_tools
+        .iter()
+        .filter(|tool| after_tools.contains(tool))
+    {
+        let (baseline, target) = tokio::join!(
+            engine_findings(app, before_id, before, before_tools, tool),
+            engine_findings(app, after_id, after, after_tools, tool)
+        );
+        if let (Some(baseline), Some(target)) = (baseline, target) {
+            comparable.push(tool);
+            before_findings.extend(baseline);
+            after_findings.extend(target);
+        }
+    }
+    before.findings = merge_findings(before_findings.into_iter());
+    after.findings = merge_findings(after_findings.into_iter());
+    comparable
+}
+
+async fn engine_findings(
+    app: &App,
+    id: &str,
+    saved: &Report,
+    tools: &[&str],
+    tool: &'static str,
+) -> Option<Vec<Finding>> {
+    if tools == [tool] && saved.observation_complete == Some(true) {
+        return Some(saved.findings.clone());
+    }
+    let findings = async {
+        let raw = if tool == "trivy" {
+            crate::artifacts::trivy(app, id).await?
+        } else {
+            crate::artifacts::report(app, id, tool).await?
+        };
+        let Some(raw) = raw else {
+            return Ok(None);
+        };
+        tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            let report = if tool == "trivy" {
+                Report::from_trivy(&raw)?
+            } else {
+                crate::native_scanners::parse(tool, &mut serde_json::from_slice(&raw)?, "")?
+            };
+            Ok((report.observation_complete != Some(false)).then_some(report.findings))
+        })
+        .await?
+    }
+    .await;
+    match findings {
+        Ok(findings) => findings,
+        Err(error) => {
+            tracing::warn!(scan_id = id, scanner = tool, %error, "Could not read comparison findings");
+            None
+        }
+    }
+}
+
+pub async fn publication_report(
+    app: &App,
+    scan: &crate::store::Scan,
+    saved: &Report,
+) -> ApiResult<Report> {
     let unavailable = || {
         ApiError::bad("Both scans need complete vulnerability observations to compare detections.")
     };
-    let saved = detail.report.as_ref().ok_or_else(unavailable)?;
     if saved.observation_complete == Some(false) {
         return Err(unavailable());
     }
-    let id = crate::key(&detail.scan.id)?;
-    let (scanners, failed): (Option<String>, bool) = sqlx::query_as(
-        "SELECT s.scanner,EXISTS (
-            SELECT FROM scan_activity a WHERE a.scan_id=d.id AND right(a.step,7)='_failed'
-            AND a.lease_id=(SELECT lease_id FROM scan_activity WHERE scan_id=d.id ORDER BY id DESC LIMIT 1))
-         FROM scan_directory d JOIN scans s USING(id,queued_at) WHERE d.id=$1",
+    let id = crate::key(&scan.id)?;
+    let failed: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT FROM scan_activity a WHERE a.scan_id=$1 AND right(a.step,7)='_failed'
+            AND a.lease_id=(SELECT lease_id FROM scan_activity WHERE scan_id=$1 ORDER BY id DESC LIMIT 1))",
     ).bind(id).fetch_one(&app.0.database.primary).await?;
-    let engines_from_record = scanners.as_deref().unwrap_or("").split(", ");
-    let mut engines: Vec<String> = engines_from_record
-        .filter(|name| crate::discrepancies::SCANNERS.contains(name))
-        .map(str::to_owned)
-        .collect();
-    engines.sort();
-    if failed || (engines.is_empty() && detail.scan.source != "import") {
+    if failed || engines(saved, &scan.source).is_empty() {
         return Err(unavailable());
     }
-    if trivy_only || saved.observation_complete.is_none() {
-        // Legacy aggregate finding keys may include other scans of the same digest.
-        if !trivy_only && detail.scan.source != "import" && engines != ["trivy"] {
-            return Err(ApiError::bad(
-                "This older scan has no complete scan-specific finding record. Run a new scan to compare detections.",
-            ));
-        }
-        let raw = crate::artifacts::trivy(app, &detail.scan.id)
-            .await?
-            .ok_or_else(unavailable)?;
-        let (mut parsed, os_vulnerability_results) =
-            crate::domain::Report::parse_trivy(&raw).map_err(ApiError::bad)?;
-        if parsed.observation_complete != Some(true) || (trivy_only && !os_vulnerability_results) {
-            return Err(unavailable());
-        }
-        parsed.digest = saved.digest.clone();
-        return Ok((parsed, vec!["trivy".into()]));
+    let raw = crate::artifacts::trivy(app, &scan.id)
+        .await?
+        .ok_or_else(unavailable)?;
+    let (mut parsed, os_vulnerability_results) =
+        Report::parse_trivy(&raw).map_err(ApiError::bad)?;
+    if parsed.observation_complete != Some(true) || !os_vulnerability_results {
+        return Err(unavailable());
     }
-    if detail.scan.source == "import" && engines.is_empty() {
-        engines.push("trivy".into());
-    }
-    Ok((saved.clone(), engines))
+    parsed.digest = saved.digest.clone();
+    Ok(parsed)
 }
 
 pub async fn issues(app: &App, scan: &str) -> ApiResult<Value> {

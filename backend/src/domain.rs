@@ -692,21 +692,36 @@ fn finding_state(finding: &Finding) -> String {
 #[serde(rename_all = "camelCase")]
 pub struct Observation {
     advisory: String,
+    severity: String,
+    fix_available: bool,
     #[serde(flatten)]
     change: Change,
 }
 
-fn observation_versions(report: &Report) -> BTreeMap<(&str, &str, &str), BTreeSet<String>> {
-    let mut versions: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
+#[derive(Default)]
+struct ObservedPackage<'a> {
+    versions: BTreeSet<String>,
+    severity: &'a str,
+    fix_available: bool,
+}
+
+fn observation_versions(report: &Report) -> BTreeMap<(&str, &str, &str), ObservedPackage<'_>> {
+    let mut versions = BTreeMap::<_, ObservedPackage<'_>>::new();
     for finding in &report.findings {
-        versions
+        let observed = versions
             .entry((
                 finding.ecosystem.as_str(),
                 finding.id.as_str(),
                 finding.package.as_str(),
             ))
-            .or_default()
-            .insert(finding_state(finding));
+            .or_default();
+        observed.versions.insert(finding_state(finding));
+        if observed.severity.is_empty()
+            || severity_rank(&finding.severity) > severity_rank(observed.severity)
+        {
+            observed.severity = &finding.severity;
+        }
+        observed.fix_available |= !finding.fixed.is_empty();
     }
     versions
 }
@@ -720,8 +735,11 @@ fn observation_diff(baseline: &Report, target: &Report) -> Vec<Observation> {
             let key = (ecosystem, advisory, package);
             let previous = before.get(&key);
             let current = after.get(&key);
+            let evidence = current.or(previous).expect("observation has a report");
             Observation {
                 advisory: advisory.to_owned(),
+                severity: evidence.severity.to_owned(),
+                fix_available: evidence.fix_available,
                 change: Change {
                     name: format!("{advisory} · {package}"),
                     ecosystem: ecosystem.to_owned(),
@@ -730,8 +748,12 @@ fn observation_diff(baseline: &Report, target: &Report) -> Vec<Observation> {
                         (_, None) => "Removed",
                         _ => "Still detected",
                     },
-                    before: previous.into_iter().flatten().cloned().collect(),
-                    after: current.into_iter().flatten().cloned().collect(),
+                    before: previous
+                        .map(|item| item.versions.iter().cloned().collect())
+                        .unwrap_or_default(),
+                    after: current
+                        .map(|item| item.versions.iter().cloned().collect())
+                        .unwrap_or_default(),
                 },
             }
         })

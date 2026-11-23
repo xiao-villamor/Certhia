@@ -26,6 +26,7 @@ pub fn routes() -> Router<App> {
     Router::new()
         .route("/scans/bulk", post(bulk).get(batches))
         .route("/scans/{id}/rescan", post(rescan))
+        .route("/scans/{id}/retry-options", get(retry_options))
         .route("/scans/{id}/cancel", post(cancel))
         .route("/scans/{id}/report/{format}", get(crate::exports::download))
         .route(
@@ -106,6 +107,27 @@ async fn batches(
         LEFT JOIN batch_scans bs ON b.id=bs.batch_id LEFT JOIN scan_directory d ON d.id=bs.scan_id LEFT JOIN scans s ON s.id=d.id AND s.queued_at=d.queued_at
         GROUP BY b.id,b.created_at ORDER BY b.id DESC",page.cursor,page.limit()?+1).fetch_all(&app.0.database.primary).await?;
     crate::page_rows(rows.into_iter().map(|r|json!({"id":r.id,"createdAt":r.created_at,"total":r.total,"finished":r.finished,"failed":r.failed})).collect(),page.limit()?,|v|v["id"].as_str().unwrap().to_owned())
+}
+
+async fn retry_options(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    let previous = app
+        .0
+        .database
+        .replay(&id)
+        .await?
+        .ok_or_else(|| ApiError::missing("Scan not found."))?;
+    let scanners = crate::jobs::scanners(&app, &id).await?;
+    let priority = sqlx::query_scalar::<_, i32>(
+        "SELECT s.priority FROM scan_directory d JOIN scans s USING(id,queued_at) WHERE d.id=$1",
+    )
+    .bind(crate::key(&id)?)
+    .fetch_one(&app.0.database.primary)
+    .await?;
+    Ok(Json(json!({
+        "reference":previous.reference,"platform":previous.platform,"registryId":previous.registry_id,
+        "source":if previous.source=="import" { "registry" } else { &previous.source },
+        "scanners":scanners,"priority":priority,
+    })))
 }
 
 async fn rescan(
@@ -668,6 +690,9 @@ struct AuditEvent {
     detail: String,
     created_at: chrono::DateTime<chrono::Utc>,
     actor_user_id: Option<Uuid>,
+    actor_name: Option<String>,
+    resource_label: Option<String>,
+    resource_path: Option<String>,
 }
 
 async fn events(
@@ -680,10 +705,29 @@ async fn events(
     }
     .limit()?;
     let rows = sqlx::query_as::<_, AuditEvent>(
-        "SELECT id,action,resource,detail,created_at,actor_user_id FROM audit_events
-         WHERE ($1::bigint IS NULL OR id<$1)
-         AND ($3::text IS NULL OR action ILIKE '%'||$3||'%' OR resource ILIKE '%'||$3||'%' OR detail ILIKE '%'||$3||'%')
-         ORDER BY id DESC LIMIT $2",
+        "WITH entries AS (
+           SELECT a.*,nullif(u.display_name,'') AS actor_name,
+             CASE WHEN a.resource ~* '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$' THEN a.resource::uuid END AS target
+           FROM audit_events a LEFT JOIN auth_users u ON u.id=a.actor_user_id
+           WHERE ($1::bigint IS NULL OR a.id<$1)
+             AND ($3::text IS NULL OR a.action ILIKE '%'||$3||'%' OR a.resource ILIKE '%'||$3||'%'
+               OR a.detail ILIKE '%'||$3||'%' OR u.display_name ILIKE '%'||$3||'%')
+           ORDER BY a.id DESC LIMIT $2
+         ) SELECT a.id,a.action,a.resource,a.detail,a.created_at,a.actor_user_id,a.actor_name,
+             coalesce(s.reference,t.name,r.name,k.name,p.reference) AS resource_label,
+             CASE WHEN s.id IS NOT NULL THEN '/scans/'||s.id::text
+                  WHEN t.id IS NOT NULL THEN '/scheduled-scans'
+                  WHEN r.id IS NOT NULL THEN '/registries'
+                  WHEN k.id IS NOT NULL THEN '/settings?section=issue-trackers'
+                  WHEN p.id IS NOT NULL THEN '/patches' END AS resource_path
+         FROM entries a
+         LEFT JOIN scan_directory d ON a.action LIKE 'scan.%' AND d.id=a.target
+         LEFT JOIN scans s ON s.id=d.id AND s.queued_at=d.queued_at
+         LEFT JOIN schedules t ON a.action LIKE 'schedule.%' AND t.id=a.target
+         LEFT JOIN registry_profiles r ON a.action LIKE 'registry.%' AND r.id=a.target
+         LEFT JOIN issue_trackers k ON a.action LIKE 'issue_tracker.%' AND k.id=a.target
+         LEFT JOIN patches p ON a.action LIKE 'patch.%' AND p.id=a.target
+         ORDER BY a.id DESC",
     ).bind(q.cursor).bind(limit + 1).bind(q.q).fetch_all(&app.0.database.primary).await?;
     crate::page_rows(rows, limit, |event| event.id.to_string())
 }

@@ -58,6 +58,10 @@ pub fn classify(method: &str, path: &str) -> Option<Access> {
             | "/scans/{id}/events"
             | "/scans/{id}/progress"
             | "/scans/{id}/previous"
+            | "/scans/{id}/previous-version"
+            | "/scans/{id}/report/summary"
+            | "/scans/{id}/report/findings"
+            | "/scans/{id}/report/scanner-differences"
             | "/scans/{id}/classifications"
             | "/scans/{id}/watch"
             | "/scans/{id}/report/{format}"
@@ -94,12 +98,16 @@ pub fn classify(method: &str, path: &str) -> Option<Access> {
             | "/registries/{id}/catalog"
             | "/registries/{id}/tags"
             | "/discover/dockerhub"
+            | "/discover/dockerhub/tags"
             | "/discover/docker"
             | "/discover/swarm"
             | "/discover/kubernetes"
             | "/discover/kubernetes/namespaces"
             | "/config/raw-output"
             | "/scanners/available"
+            | "/scans/{id}/retry-options"
+            | "/scheduled-scans/preview"
+            | "/scheduled-scans/kubernetes"
             | "/settings/issue-trackers",
         )
         | (

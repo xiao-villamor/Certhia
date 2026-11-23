@@ -39,6 +39,7 @@ export interface ScanProgress {
   status: Status | 'removed';
   queuePosition: number;
   startedAt?: string | null;
+  workerHeartbeatAt?: string | null;
   activity?: { step: string; title: string; detail: string; at: string }[];
 }
 
@@ -93,6 +94,15 @@ export interface ScanDetail extends Scan {
   report: Report | null;
 }
 
+export interface ScanRetryOptions {
+  reference: string;
+  platform: string;
+  registryId: string | null;
+  source: Scan['source'];
+  scanners: string[];
+  priority: number;
+}
+
 export interface ImageWatch {
   id: string;
   reference: string;
@@ -110,6 +120,8 @@ export interface Change {
 
 export interface Observation extends Omit<Change, 'status'> {
   advisory: string;
+  severity: string;
+  fixAvailable: boolean;
   status: 'Added' | 'Removed' | 'Still detected';
 }
 
@@ -119,6 +131,8 @@ export interface Comparison {
   baselineDigest?: string;
   targetDigest?: string;
   scanners: string[];
+  baselineScanners: string[];
+  targetScanners: string[];
   publication?: string;
   selected: { id: string; detected: boolean }[];
   baselineIssues: Record<string, import('./tracking.js').TrackerIssue>;

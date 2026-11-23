@@ -3,7 +3,7 @@
   import { advisoryDetail, referenceLabel, type AdvisoryDetail } from '#lib/advisory.js';
 
   /** `compact` keeps the dialog short: a clamped description and the first few references. */
-  let { id, compact = false }: { id: string; compact?: boolean } = $props();
+  let { id, compact = false, summaryFallback = false }: { id: string; compact?: boolean; summaryFallback?: boolean } = $props();
   let detail = $state<AdvisoryDetail | null>();
   let expanded = $state(false);
 
@@ -18,12 +18,13 @@
   const references = $derived(detail?.references ?? []);
   const shownReferences = $derived(compact && !expanded ? references.slice(0, 3) : references);
   const hasScores = $derived(!!detail && (detail.cvssScore != null || detail.epss != null || detail.kev || !!detail.publishedAt));
-  const longDescription = $derived((detail?.description?.length ?? 0) > 280);
+  const description = $derived(detail?.description || (summaryFallback ? detail?.summary : null));
+  const longDescription = $derived((description?.length ?? 0) > 280);
 </script>
 
 {#if detail === undefined}
   <p class="field-help" role="status">Loading advisory details…</p>
-{:else if detail && (hasScores || detail.description || references.length)}
+{:else if detail && (hasScores || description || references.length)}
   <div class="advisory-details" class:compact>
     {#if hasScores}
       <dl class="advisory-scores">
@@ -35,10 +36,10 @@
         {#if detail.publishedAt}<div><dt>Published</dt><dd>{day.format(new Date(detail.publishedAt))}</dd></div>{/if}
       </dl>
     {/if}
-    {#if detail.description}
+    {#if description}
       <section aria-label="Advisory description">
         <h3>Description</h3>
-        <p class="description" class:clamped={compact && longDescription && !expanded}>{detail.description}</p>
+        <p class="description" class:clamped={compact && longDescription && !expanded}>{description}</p>
       </section>
     {/if}
     {#if references.length}
@@ -51,9 +52,9 @@
         </ul>
       </section>
     {/if}
-    {#if compact && !expanded && (longDescription || references.length > 3)}
-      <button type="button" class="text-button more" onclick={() => { expanded = true; }}>
-        Show full advisory{references.length > 3 ? ` · ${references.length} references` : ''}
+    {#if compact && (longDescription || references.length > 3)}
+      <button type="button" class="text-button more" aria-expanded={expanded} onclick={() => { expanded = !expanded; }}>
+        {expanded ? 'Show less' : 'Show full advisory' + (references.length > 3 ? ` · ${references.length} references` : '')}
       </button>
     {/if}
   </div>

@@ -24,20 +24,22 @@ pub async fn download(
     Path((id, format)): Path<(String, String)>,
 ) -> ApiResult<Response> {
     if format == "discrepancies" {
-        crate::key(&id)?;
+        let scan = app
+            .0
+            .database
+            .replay(&id)
+            .await?
+            .ok_or_else(|| ApiError::missing("Scan not found."))?;
         if let Some(bytes) = crate::artifacts::discrepancies(&app, &id)
             .await
             .map_err(ApiError::bad)?
         {
             return Ok(attachment(
-                &id,
+                &scan_filename(&scan.reference, &scan.platform, &id),
                 "application/json",
                 "discrepancies.json",
                 bytes,
             ));
-        }
-        if app.0.database.replay(&id).await?.is_none() {
-            return Err(ApiError::missing("Scan not found."));
         }
         return Err(ApiError::bad(
             "A comparison requires completed reports from at least two vulnerability scanners.",
@@ -59,6 +61,7 @@ pub async fn download(
         .report
         .ok_or_else(|| ApiError::bad("Wait for the scan to complete."))?;
     let scan = detail.scan;
+    let filename = scan_filename(&scan.reference, &scan.platform, &id);
     let raw = match format.as_str() {
         "cbom" => crate::artifacts::cbom(&app, &id)
             .await?
@@ -121,16 +124,40 @@ pub async fn download(
     })
     .await
     .map_err(anyhow::Error::from)??;
-    Ok(attachment(&id, mime, extension, body))
+    Ok(attachment(&filename, mime, extension, body))
 }
 
-pub(crate) fn attachment(id: &str, mime: &str, extension: &str, body: Vec<u8>) -> Response {
+pub(crate) fn scan_filename(reference: &str, platform: &str, id: &str) -> String {
+    let slug = |value: &str| -> String {
+        value
+            .chars()
+            .take(65)
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                    ch
+                } else {
+                    '-'
+                }
+            })
+            .collect()
+    };
+    let image = reference.rsplit('/').next().unwrap_or(reference);
+    let suffix = id.get(id.len().saturating_sub(8)..).unwrap_or(id);
+    format!(
+        "certhia-{}-{}-{}",
+        slug(image),
+        slug(platform),
+        slug(suffix)
+    )
+}
+
+pub(crate) fn attachment(filename: &str, mime: &str, extension: &str, body: Vec<u8>) -> Response {
     (
         [
             (header::CONTENT_TYPE, mime.to_owned()),
             (
                 header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"digestdesk-{id}.{extension}\""),
+                format!("attachment; filename=\"{filename}.{extension}\""),
             ),
             (header::CACHE_CONTROL, "no-store".to_owned()),
         ],

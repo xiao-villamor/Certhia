@@ -3,10 +3,11 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 
-const root = path.resolve(process.env.CERTHIA_PROJECT || process.cwd(), 'web/build');
+const root = path.resolve(process.env.CERTHIA_WEB_DIR || path.join(process.env.CERTHIA_PROJECT || process.cwd(), 'web/build'));
 const origin = 'http://certhia.test';
 const reference = 'example.test/team/api:1.0';
 const registry = {id:'reg-1', name:'Team registry', host:'example.test', provider:'gitea', authenticated:true};
+const customRegistry = {id:'reg-2', name:'Custom registry', host:'registry.example.test:5000', provider:'oci', authenticated:true};
 const user = {id:'operator', email:'operator@example.test', role:'operator'};
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -34,7 +35,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
         return route.fulfill({path:path.join(root,'200.html'), contentType:'text/html'});
       }
       if (key === '/api/auth/me') return json({user,local:true,oidcEmailLinking:false});
-      if (key === '/api/registries') return json([registry]);
+      if (key === '/api/registries') return json([registry,customRegistry]);
       if (key === '/api/scanners/available') return json({local:['trivy','syft'],registry:['trivy','syft'],defaults:['trivy']});
       if (key === '/api/discover/kubernetes/namespaces') return json({error:'Namespace enumeration is restricted.'},403);
       if (key === '/api/discover/kubernetes') {
@@ -46,22 +47,29 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
       }
       if (key === '/api/discover/swarm') return json([{reference,label:'api-service'}]);
       if (key === '/api/discover/docker') return json([{reference:'sha256:' + '1'.repeat(64),label:'team/api:1'}]);
-      if (key === '/api/discover/dockerhub') return json([{reference:'docker.io/library/alpine',label:'alpine'}]);
+      if (key === '/api/discover/dockerhub') return json([{reference:'docker.io/library/alpine:latest',label:'alpine'}]);
+      if (key === '/api/discover/dockerhub/tags') return json({tags:['latest','3.22']});
       if (key.startsWith('/api/registries/reg-1/catalog')) return json(catalogMode === 'restricted'
         ? {images:[],refreshedAt:null,error:'Catalog listing is restricted.',nextCursor:null}
-        : {images:['team/api'], refreshedAt:new Date().toISOString(), error:null,nextCursor:null});
-      if (key === '/api/registries/reg-1/tags') return json({error:'Could not list tags.'},403);
+        : {images:['team/api','team.ops/worker'], refreshedAt:new Date().toISOString(), error:null,nextCursor:null});
+      if (key === '/api/registries/reg-1/tags') {
+        if (catalogMode === 'tags-denied') return json({error:'Could not list tags.'},403);
+        if (url.searchParams.get('image') === registry.host + '/team/api') return json({tags:['1.0','1.1']});
+        if (url.searchParams.get('image') === registry.host + '/team.ops/worker') return json({tags:['2.0']});
+        return json({error:'Unexpected repository reference.'},400);
+      }
+      if (key === '/api/registries/reg-2/catalog') return json({images:[],refreshedAt:null,error:'Custom registry catalog listing is restricted.',nextCursor:null});
       if (key === '/api/scans' && req.method() === 'POST') {
         submissions.push(req.postDataJSON());
         return json({id:'inventory'},202);
       }
       const parts = key.split('/');
       const scanId = parts[3];
-      if (parts[2] === 'scans' && parts.length === 4) {
+      if (parts[2] === 'scans' && (parts.length === 4 || parts[5] === 'summary')) {
         const inventoryAvailable = scanId === 'inventory';
         const counts = {critical:0,high:0,medium:0,low:0,unknown:0,packages:Number(inventoryAvailable)};
         return json({id:scanId,reference,platform:'linux/amd64',source:'kubernetes',
-          status:'completed',createdAt:'2026-10-01T10:00:00Z',finishedAt:'2026-10-01T10:00:10Z',counts,
+          status:'completed',facets:[],createdAt:'2026-10-01T10:00:00Z',finishedAt:'2026-10-01T10:00:10Z',counts,
           report:{counts,packages:inventoryAvailable ? [{name:'demo',version:'1',ecosystem:'deb'}] : [],
             inventoryAvailable,findings:[],checks:[],digest:null,os:'Debian',sizeBytes:512}});
       }
@@ -110,6 +118,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     await page.waitForURL('**/scans/inventory');
     assert.deepEqual(submissions.at(-1),{reference,platform:'linux/amd64',registryId:'reg-1',source:'kubernetes',priority:0,scanners:[]});
     assert.ok(scopes.includes('denied'));
+    await page.getByRole('button',{name:'Downloads',exact:true}).click();
     const download = page.getByRole('link',{name:'Download CycloneDX SBOM'});
     assert.equal(await download.getAttribute('href'),'/api/scans/inventory/report/sbom');
     const file = page.waitForEvent('download');
@@ -118,33 +127,86 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     assert.equal(JSON.parse(await fs.readFile(await saved.path(),'utf8')).bomFormat,'CycloneDX');
     console.log('PASS Kubernetes selection, restricted namespaces, empty results, denied/late responses, registry credentials, scan submission and report download');
 
-    await page.goto(origin + '/scans/artifact');
+    await page.goto(origin + '/scans/artifact?view=downloads');
     await page.getByText('Checking for a scanner SBOM…').waitFor();
     assert.equal(await download.getAttribute('href'),'/api/scans/artifact/scanner-results/sbom');
-    await page.goto(origin + '/scans/unavailable');
+    await page.goto(origin + '/scans/unavailable?view=downloads');
     await page.getByRole('link',{name:'Reload report'}).waitFor();
-    assert.equal(await page.getByRole('button',{name:'Download CycloneDX SBOM'}).isDisabled(),true);
+    assert.equal(await download.count(),0);
     artifactReply='ready';
     await page.getByRole('link',{name:'Reload report'}).click();
-    await page.getByText('This scan has no package inventory.',{exact:false}).waitFor();
+    await page.getByText('This scan has no package inventory to export.',{exact:false}).waitFor();
     console.log('PASS original artifact fallback, loading, missing inventory and recoverable artifact error');
 
     await page.goto(origin + '/scans/new?registry=reg-1');
     await main.getByText('Catalog listing is restricted.').waitFor();
-    await main.getByRole('button',{name:'Enter image tag or digest'}).click();
+    const enterManually = main.getByRole('button',{name:'Enter image tag or digest'});
+    const startScan = main.getByRole('button',{name:'Start scan',exact:true});
+    assert.equal(await ref.count(),0);
+    assert.ok(await startScan.isDisabled());
+    await enterManually.click();
     assert.ok(await ref.evaluate(el => document.activeElement === el));
     await ref.fill(reference);
-    await main.getByRole('button',{name:'Start scan',exact:true}).click();
+    await startScan.click();
     await page.waitForURL('**/scans/inventory');
     assert.equal(submissions.at(-1).registryId,'reg-1');
     assert.equal(submissions.at(-1).reference,reference);
+
+    catalogMode='ready';
+    await page.goto(origin + '/scans/new?registry=reg-1');
+    const repositories = main.getByRole('combobox',{name:'Repository',exact:true});
+    const tags = main.getByRole('combobox',{name:'Tag',exact:true});
+    const profile = main.getByRole('combobox',{name:'Registry connection'});
+    await repositories.selectOption('team/api');
+    assert.equal(await ref.count(),0);
+    assert.ok(await startScan.isDisabled());
+    await tags.selectOption('1.1');
+    assert.ok(await startScan.isEnabled());
+    await tags.selectOption('');
+    assert.ok(await startScan.isDisabled());
+    await tags.selectOption('1.1');
+    await repositories.selectOption('team.ops/worker');
+    assert.equal(await tags.inputValue(),'');
+    assert.ok(await startScan.isDisabled());
+    await tags.selectOption('2.0');
+    await profile.selectOption(customRegistry.id);
+    assert.equal(await ref.count(),0);
+    assert.ok(await startScan.isDisabled());
+    await profile.selectOption(registry.id);
+    await repositories.selectOption('team.ops/worker');
+    await tags.selectOption('2.0');
+    await startScan.click();
+    await page.waitForURL('**/scans/inventory');
+    assert.equal(submissions.at(-1).registryId,registry.id);
+    assert.equal(submissions.at(-1).reference,registry.host + '/team.ops/worker:2.0');
+
     catalogMode='tags-denied';
     await page.goto(origin + '/scans/new?registry=reg-1');
-    await main.getByRole('combobox',{name:'Repository',exact:true}).selectOption('team/api');
+    await repositories.selectOption('team/api');
     await main.getByText('Could not list tags.').waitFor();
-    await main.getByRole('button',{name:'Enter image tag or digest'}).click();
+    assert.ok(await startScan.isDisabled());
+    await enterManually.click();
     assert.ok(await ref.evaluate(el => document.activeElement === el));
-    console.log('PASS restricted registry catalog and tags, keyboard focus, manual scan using saved credentials');
+    assert.equal(await ref.inputValue(),registry.host + '/team/api');
+    assert.equal(await repositories.count(),0);
+    await profile.selectOption(customRegistry.id);
+    assert.equal(await ref.count(),0);
+    await main.getByText('Custom registry catalog listing is restricted.',{exact:true}).waitFor();
+    await enterManually.click();
+    await ref.fill('workloads/service:2.4');
+    await profile.selectOption(registry.id);
+    assert.equal(await ref.inputValue(),'workloads/service:2.4');
+    await main.getByRole('button',{name:'Browse repositories',exact:true}).click();
+    assert.ok(await enterManually.evaluate(el => document.activeElement === el));
+    assert.equal(await ref.count(),0);
+    await profile.selectOption(customRegistry.id);
+    await enterManually.click();
+    await ref.fill('workloads/service:2.4');
+    await startScan.click();
+    await page.waitForURL('**/scans/inventory');
+    assert.equal(submissions.at(-1).registryId,customRegistry.id);
+    assert.equal(submissions.at(-1).reference,'workloads/service:2.4');
+    console.log('PASS saved registry repository and tag selection, reset on connection change, manual fallback and focus');
 
     await page.goto(origin + '/scans/new?mode=swarm');
     await main.getByRole('button',{name:'Find service images'}).click();
@@ -161,11 +223,19 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     await main.locator('summary').filter({hasText:'Search Docker Hub'}).click();
     await main.getByRole('textbox',{name:'Docker Hub search'}).fill('alpine');
     await main.getByRole('button',{name:'Search Docker Hub'}).click();
-    await main.getByRole('combobox',{name:/Discovered images/}).selectOption('docker.io/library/alpine');
-    assert.equal(await ref.inputValue(),'docker.io/library/alpine');
+    await main.getByRole('combobox',{name:/Discovered images/}).selectOption('docker.io/library/alpine:latest');
+    await main.getByRole('combobox',{name:/Docker Hub tag/}).selectOption('3.22');
+    assert.equal(await ref.inputValue(),'docker.io/library/alpine:3.22');
     console.log('PASS Swarm submission, local Docker bulk selection, Docker Hub image search');
 
     await page.setViewportSize({width:390,height:844});
+    const digestReference = `${customRegistry.host}/team/service@sha256:${'1'.repeat(64)}`;
+    await page.goto(origin + '/scans/new?' + new URLSearchParams({registry:customRegistry.id,image:digestReference}));
+    await ref.waitFor();
+    assert.equal(await profile.inputValue(),customRegistry.id);
+    assert.equal(await ref.inputValue(),digestReference);
+    assert.equal(await repositories.count(),0);
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     await page.locator('button.mobile-scan-entry').click();
     const dialog = page.getByRole('dialog',{name:'Start scan'});
     await dialog.getByText('Kubernetes',{exact:true}).click();

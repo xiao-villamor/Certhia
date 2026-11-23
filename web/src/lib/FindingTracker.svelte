@@ -4,7 +4,7 @@
   import ConfigDialog from '#lib/ConfigDialog.svelte';
   import IssueLink from '#lib/IssueLink.svelte';
   import { allPages, api, classifications, message, post, scannerName, shortDigest, type Finding, type ScanDetail } from '#lib/api.js';
-  import { detectionKey } from '#lib/finding-evidence.js';
+  import { detectionKey, findingDescription } from '#lib/finding-evidence.js';
   import { classificationsPath, findingReportPath, issueTrackersPath, trackerName, type ExceptionScope, type FindingException, type FindingTracking, type IssueScope, type IssueTracker, type TrackerIssue, type TrackingTarget } from '#lib/tracking.js';
 
   let { target, findingSources, evidencePending = false, evidenceUnavailable = false, dismiss, onSaved }: {
@@ -22,6 +22,10 @@
   let exceptionScope = $state<ExceptionScope>('reference');
   let exceptionReason = $state('');
   let exceptionExpiry = $state('');
+  let reasonInput = $state<HTMLTextAreaElement>();
+  let expiryInput = $state<HTMLInputElement>();
+  let invalidException = $state<'reason' | 'expiry'>();
+  const exceptionToday = $derived(target ? new Date().toISOString().slice(0, 10) : '');
   const keepExisting = 'existing';
   let trackers = $state<IssueTracker[]>([]);
   let trackerId = $state('');
@@ -73,6 +77,7 @@
   })));
   const detectorNames = $derived([...new Set(evidence.flatMap(row => row.names))].sort());
   const aliases = $derived([...new Set(details.flatMap(detail => detail.aliases ?? []))]);
+  const description = $derived(findingDescription(evidence[0]?.detail.title ?? ''));
   const detectorStatus = $derived((findingSources ? evidencePending : detectorLoading)
     ? 'Loading…' : (findingSources ? evidenceUnavailable : detectorError) ? 'Unavailable' : 'Not recorded');
   const showPackageDetectors = $derived(evidence.length > 1
@@ -94,6 +99,7 @@
       note = saved?.note ?? '';
       savedException = saved?.exception;
       exceptionMode = 'keep';
+      invalidException = undefined;
       exceptionScope = saved?.exception?.scope ?? 'reference';
       exceptionReason = saved?.exception?.reason ?? '';
       exceptionExpiry = saved?.exception?.expiresAt.slice(0, 10) ?? '';
@@ -135,6 +141,18 @@
   async function save(event: SubmitEvent) {
     event.preventDefault();
     if (!auth.operator || !target || !loaded || busy) return;
+    if (exceptionMode === 'set') {
+      if (!exceptionReason.trim()) {
+        invalidException = 'reason';
+        reasonInput?.focus();
+        return;
+      }
+      if (!exceptionExpiry || exceptionExpiry < new Date().toISOString().slice(0, 10)) {
+        invalidException = 'expiry';
+        expiryInput?.focus();
+        return;
+      }
+    }
     const entry = target;
     busy = true; error = '';
     const issueId = key.trim();
@@ -173,7 +191,7 @@
     <section class="finding-summary" aria-label="Vulnerability evidence">
       <div class="context-heading">
         <span class={'severity ' + first.severity.toLowerCase()}>{first.severity.toLowerCase()}</span>
-        {#if first.title}<p>{first.title}</p>{/if}
+        {#if description.summary}<p>{description.summary}</p>{/if}
       </div>
       {#if aliases.length}<p class="field-help mono">{aliases.join(' · ')}</p>{/if}
       <div class="detectors" aria-label="Detected by">
@@ -186,11 +204,12 @@
 
   {#if loaded}
     <div class="tracking-grid">
-      <label class="field"><span>Tracking status</span>
+      <label class="field"><span>Manual tracking status</span>
         <select bind:value={status} disabled={busy || !auth.operator}>
           {#each classifications as [value, label]}<option {value}>{label}</option>{/each}
         </select>
         <small>This image version and platform{#if target?.digest}{' · '}<span class="mono" title={target.digest}>{shortDigest(target.digest)}</span>{/if}</small>
+        {#if savedException && status === 'open'}<small><strong>Effective status · Excepted</strong> · Hidden from the open triage queue until expiry or removal.</small>{/if}
       </label>
       {#if stored}
         <div class="linked-issue">
@@ -223,11 +242,17 @@
                 <small>Applies to this advisory. A tag or repository exception applies to future versions in that scope.</small>
               </label>
               <label class="field"><span>Reason</span>
-                <textarea bind:value={exceptionReason} rows="2" required maxlength="4000" disabled={busy}></textarea>
+                <textarea bind:this={reasonInput} bind:value={exceptionReason} rows="2" required maxlength="4000" disabled={busy}
+                  aria-invalid={invalidException === 'reason' || undefined} aria-describedby={invalidException === 'reason' ? 'finding-exception-reason' : undefined}
+                  oninput={() => invalidException = undefined} oninvalid={() => invalidException = 'reason'}></textarea>
+                {#if invalidException === 'reason'}<small id="finding-exception-reason" role="alert">Enter a reason for the exception.</small>{/if}
               </label>
               <label class="field"><span>Expiry date (UTC)</span>
-                <input type="date" bind:value={exceptionExpiry} required disabled={busy} />
-                <small>Expires at the end of the selected day.</small>
+                <input type="date" bind:this={expiryInput} bind:value={exceptionExpiry} min={exceptionToday} required disabled={busy}
+                  aria-invalid={invalidException === 'expiry' || undefined} aria-describedby="finding-exception-expiry"
+                  oninput={() => invalidException = undefined} oninvalid={() => invalidException = 'expiry'} />
+                <small id="finding-exception-expiry" role={invalidException === 'expiry' ? 'alert' : undefined}>{invalidException === 'expiry'
+                  ? 'Choose today or a future date in UTC.' : 'Expires at the end of the selected day.'}</small>
               </label>
               <button type="button" class="button secondary" onclick={() => exceptionMode = 'keep'} disabled={busy}>Cancel change</button>
             {:else if exceptionMode === 'revoke'}
@@ -314,6 +339,12 @@
       {#if status === 'false_positive'}<small>The OpenVEX export includes this note.</small>{/if}
     </label>
   {/if}
+  {#if description.full}
+    <section class="scanner-description" aria-labelledby="scanner-description-title">
+      <h3 id="scanner-description-title">Scanner description</h3>
+      <p>{description.full}</p>
+    </section>
+  {/if}
   {#if target}
     <details class="form-disclosure" bind:open={advisoryOpen}>
       <summary>Advisory details</summary>
@@ -343,6 +374,8 @@
   .tracking-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .85rem; align-items: start; }
   .linked-issue { display: grid; justify-items: start; gap: .3rem; }
   .tracking-note textarea { min-height: 3.6rem; }
+  .scanner-description { display: grid; gap: .35rem; }
+  .scanner-description p { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--text-label); color: var(--muted); }
   .package-evidence :is(th, td) { padding: .4rem .55rem; }
   .advisory-link { justify-self: start; color: var(--accent-ink); font-size: .82rem; font-weight: 800; text-underline-offset: 3px; }
   @media (max-width: 480px) {

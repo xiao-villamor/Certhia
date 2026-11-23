@@ -25,12 +25,18 @@ async function main() {
       assert.equal(await dialog.getByRole('combobox', {name: /^Exception scope/}).inputValue(), 'reference');
       await dialog.getByRole('textbox', {name: 'Reason', exact: true}).fill('Browser change');
       const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
-      await dialog.locator('input[type=date]').fill(tomorrow);
+      const expiry = dialog.locator('input[type=date]');
+      await expiry.fill('2000-01-01');
+      await dialog.getByRole('button', {name: 'Save tracking'}).click();
+      assert.equal(await expiry.getAttribute('aria-invalid'), 'true');
+      assert.equal(await expiry.evaluate(el => document.activeElement === el), true);
+      await expiry.fill(tomorrow);
       await dialog.getByRole('button', {name: 'Save tracking'}).click();
       await dialog.waitFor({state: 'hidden'});
       await filter.selectOption('excepted');
       await finding.click();
       await dialog.getByText('Browser change', {exact: true}).waitFor();
+      await dialog.getByText('Effective status · Excepted', {exact:true}).waitFor();
       await dialog.getByRole('button', {name: 'Remove exception'}).click();
       await dialog.getByRole('button', {name: 'Save tracking'}).click();
       await dialog.waitFor({state: 'hidden'});
@@ -50,7 +56,7 @@ async function main() {
       assert.equal(await summary.getByText('Trivy', {exact:true}).count(), 1);
       await dialog.getByText('Affected packages (2)', {exact:true}).click();
       assert.equal(await dialog.getByRole('table').getByRole('row').count(), 3);
-      await dialog.getByRole('combobox',{name:/^Tracking status/}).selectOption('in_progress');
+      await dialog.getByRole('combobox',{name:/^Manual tracking status/}).selectOption('in_progress');
       await dialog.getByRole('combobox',{name:'Issue tracker'}).selectOption(tracker);
       await dialog.getByRole('textbox',{name:'Issue ID'}).fill('SEC-6020');
       assert.equal(await dialog.getByRole('combobox',{name:/^Ticket scope/}).inputValue(), 'advisory');
@@ -59,7 +65,7 @@ async function main() {
       await page.goto(base + '/scans/' + sharedScan);
       await page.getByRole('button', { name: label }).first().click();
       await dialog.getByRole('link', { name: 'SEC-6020' }).waitFor();
-      assert.equal(await dialog.getByRole('combobox',{name:/^Tracking status/}).inputValue(), 'open');
+      assert.equal(await dialog.getByRole('combobox',{name:/^Manual tracking status/}).inputValue(), 'open');
       if (process.env.CERTHIA_TRACKING_SCREENSHOT) {
         await page.goto(base + '/scans/' + scanId);
         await page.getByRole('button', { name: label }).first().click();
@@ -79,7 +85,7 @@ async function main() {
     for (const item of cases) {
       await finding(item.id).click();
       const dialog = page.getByRole('dialog', { name: item.id });
-      await dialog.getByRole('combobox', { name: /^Tracking status/ }).selectOption(item.status);
+      await dialog.getByRole('combobox', { name: /^Manual tracking status/ }).selectOption(item.status);
       await dialog.getByRole('textbox', { name: /Note/ }).fill(item.note);
       await dialog.getByRole('button', { name: 'Save tracking' }).click();
       await dialog.waitFor({ state: 'hidden' });
@@ -91,7 +97,7 @@ async function main() {
       await finding(cases[1 - index].id).waitFor({ state: 'hidden' });
       await finding(item.id).click();
       const dialog = page.getByRole('dialog', { name: item.id });
-      const selected = dialog.getByRole('combobox', { name: /^Tracking status/ });
+      const selected = dialog.getByRole('combobox', { name: /^Manual tracking status/ });
       await selected.waitFor({ state: 'attached' });
       assert.equal(await selected.inputValue(), item.status);
       assert.equal(await dialog.getByRole('textbox', { name: /Note/ }).inputValue(), item.note);

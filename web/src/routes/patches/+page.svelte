@@ -10,7 +10,7 @@
   interface PackageUpdate {package:string; fixed:string; installed:string|null; advisories:string[];}
   interface Publication { id:string; reference:string; pinnedReference:string|null; scanId:string|null; }
   interface Patch {id:string; scanId:string; reference:string; status:string; createdAt:string; error:string|null; packages:PackageUpdate[];publication:Publication|null;}
-  interface Analysis {image:string; packages:PackageUpdate[]; canBuild:boolean;}
+  interface Analysis {image:string; packages:PackageUpdate[]; canBuild:boolean; buildBlockers?:string[];}
   let scans = $state<Scan[]>([]);
   let registries = $state<Registry[]>([]);
   let patches = $state<Patch[]>([]);
@@ -42,7 +42,19 @@
     finally { busy = false; }
   }
   let advisories = $state<string[]>([]);
-  let allAdvisories = $derived([...new Set(analysis?.packages.flatMap(item => item.advisories) || [])]);
+  const advisoryPackages = $derived.by(() => {
+    const groups = new Map<string, PackageUpdate[]>();
+    for (const item of analysis?.packages ?? []) {
+      for (const advisory of item.advisories) {
+        const packages = groups.get(advisory);
+        if (packages) packages.push(item);
+        else groups.set(advisory, [item]);
+      }
+    }
+    return groups;
+  });
+  const allAdvisories = $derived([...advisoryPackages.keys()]);
+  const selectedPackages = $derived(analysis?.packages.filter(item => item.advisories.some(id => advisories.includes(id))).length ?? 0);
   let reference = $state('');
   let registryId = $state('');
 
@@ -140,11 +152,23 @@
   </div>
   {#if analysis}
     {#if analysis.packages.length}
-      <div class="table-wrap"><table><thead><tr><th>Package</th><th>Installed</th><th>Fixed version</th><th>Advisories</th></tr></thead>
-        <tbody>{#each analysis.packages as item}<tr><td>{item.package}</td><td class="mono">{item.installed || '—'}</td><td class="mono">{item.fixed}</td><td><div class="candidate-advisories">{#each item.advisories as advisory}<label class="inline-check"><input type="checkbox" disabled={busy || !auth.operator} checked={advisories.includes(advisory)} onchange={(event) => {advisories = event.currentTarget.checked ? [...advisories, advisory] : advisories.filter(id => id !== advisory);}} /> {advisory}</label>{/each}</div></td></tr>{/each}</tbody>
+      <div class="panel-footer filters"><span role="status">{advisories.length} advisories selected · {selectedPackages} package updates</span>
+        {#if auth.operator}
+          <button type="button" class="button secondary" disabled={busy || advisories.length === allAdvisories.length} onclick={() => advisories = [...allAdvisories]}>Select all</button>
+          <button type="button" class="button secondary" disabled={busy || !advisories.length} onclick={() => advisories = []}>Clear selection</button>
+        {/if}
+      </div>
+      <div class="table-wrap"><table><thead><tr><th>Advisory</th><th>Affected packages and reported fixes</th></tr></thead>
+        <tbody>{#each advisoryPackages as [advisory, packages] (advisory)}
+          <tr><td><label class="inline-check mono"><input type="checkbox" disabled={busy || !auth.operator}
+            checked={advisories.includes(advisory)}
+            onchange={(event) => {advisories = event.currentTarget.checked ? [...advisories, advisory] : advisories.filter(id => id !== advisory);}} /> {advisory}</label></td>
+            <td>{#each packages as item (item.package)}<div>{item.package} <span class="mono">{item.installed || '—'} → {item.fixed}</span></div>{/each}</td>
+          </tr>
+        {/each}</tbody>
       </table></div>
       {#if auth.operator}<div class="panel-footer patch-actions">
-        {#if !analysis.canBuild}<p>Building requires BuildKit and a scanned registry image with a recorded digest.</p>{/if}
+        {#if !analysis.canBuild}{#each analysis.buildBlockers ?? ['Building requires BuildKit and a scanned registry image with a recorded digest.'] as blocker}<p>{blocker}</p>{/each}{/if}
         <div class="filters">
           <button class="button secondary" onclick={() => execute(true)} disabled={busy || !advisories.length}>Save dry run</button>
           <button class="button primary" onclick={() => execute(false)} disabled={busy || !analysis.canBuild || !advisories.length}><PackageCheck size={16} aria-hidden="true" /> Build patched image</button>
@@ -204,7 +228,6 @@
   .source-link { display: inline-flex; align-items: center; gap: .4rem; width: fit-content; font-size: .82rem; }
   .patch-review .empty { min-height: 10.5rem; align-content: center; }
   .patch-actions { display: grid; gap: .65rem; border-top: 1px solid var(--line); background: var(--canvas); }
-  .candidate-advisories { display: flex; flex-wrap: wrap; column-gap: .7rem; }
   @media (max-width: 1060px) {
     .patch-workbench { grid-template-columns: 1fr; }
     .patch-review .empty { min-height: auto; padding-block: 1.5rem; }

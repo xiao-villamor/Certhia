@@ -188,6 +188,8 @@ pub async fn copy(
     docker_config(&destination_file, host, destination_auth)?;
     let mut command = skopeo(&source.platform);
     command
+        .arg("--tmpdir")
+        .arg(dir.path())
         .arg("copy")
         .arg("--quiet")
         .arg("--src-authfile")

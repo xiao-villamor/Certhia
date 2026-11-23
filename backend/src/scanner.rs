@@ -173,6 +173,19 @@ pub(crate) async fn run(mut command: Command, binary: &str, timeout: Duration) -
 fn check_exit(status: ExitStatus, stderr: &[u8], binary: &str) -> Result<()> {
     if !status.success() {
         let reason = String::from_utf8_lossy(stderr).to_lowercase();
+        if reason.contains("read-only file system") || reason.contains("no space left on device") {
+            bail!(
+                "The scan worker could not write temporary image files. Check its data directory and free space."
+            );
+        }
+        if ["toomanyrequests", "rate limit", "429 too many requests"]
+            .iter()
+            .any(|text| reason.contains(text))
+        {
+            bail!(
+                "The registry limited image requests. Wait before retrying or choose an authenticated registry connection."
+            );
+        }
         if ["unauthorized", "authentication", "denied", "401", "403"]
             .iter()
             .any(|text| reason.contains(text))
@@ -187,6 +200,11 @@ fn check_exit(status: ExitStatus, stderr: &[u8], binary: &str) -> Result<()> {
         }
         if reason.contains("x509") || reason.contains("certificate") {
             bail!("The registry TLS certificate could not be verified.");
+        }
+        if reason.contains("no image found in image index")
+            || reason.contains("no matching manifest")
+        {
+            bail!("The requested platform is unavailable for this image.");
         }
         if reason.contains("db") && reason.contains("download") {
             bail!("Trivy could not download its vulnerability database.");

@@ -3,7 +3,8 @@
   import { api, message, post, type Registry } from '#lib/api.js';
 
   interface Catalog { nextCursor: string | null; images: string[]; refreshedAt: string | null; error: string | null; }
-  let { registry, select, enterReference }: {registry: Registry; select: (reference: string) => void; enterReference: () => void} = $props();
+  let { registry, busy, select, enterReference, manualButton = $bindable() }:
+    {registry: Registry; busy: boolean; select: (reference: string) => void; enterReference: (suggestion: string) => void; manualButton?: HTMLButtonElement} = $props();
   let catalog = $state<Catalog>();
   let filter = $state('');
   let repository = $state('');
@@ -15,6 +16,7 @@
   let tagsIssue = $state('');
   let request: AbortController | undefined;
   const visible = $derived(catalog?.images ?? []);
+  const selectedRepository = $derived(repository ? registry.host + '/' + repository : '');
 
   async function load(id: string, refresh = false, cursor?: string) {
     request?.abort();
@@ -44,11 +46,10 @@
   });
 
   $effect(() => {
-    const image = repository;
+    const image = selectedRepository;
     const id = registry.id;
     tag = ''; tags = []; tagsIssue = ''; loadingTags = !!image;
     if (!image) return;
-    select(image);
     const abort = new AbortController();
     void api<{tags:string[]}>('/registries/' + id + '/tags?' + new URLSearchParams({image}), {signal:abort.signal})
       .then(result => {if (!abort.signal.aborted) tags = [...new Set(result.tags)];})
@@ -60,16 +61,27 @@
 
 <div class="registry-picker">
   <div class="filters picker-header">
-    <strong>Browse {registry.name}</strong>
-    {#if auth.admin}<button type="button" class="button secondary" onclick={() => load(registry.id, true)} disabled={loading}>Refresh catalog</button>{/if}
+    <strong>Choose an image</strong>
+    <div class="filters">
+      {#if auth.admin}<button type="button" class="button secondary" onclick={() => load(registry.id, true)} disabled={loading || busy}>Refresh catalog</button>{/if}
+      <button type="button" class="button secondary" disabled={busy} bind:this={manualButton} onclick={() => enterReference(selectedRepository)}>Enter image tag or digest</button>
+    </div>
   </div>
   {#if loading && !catalog}
     <p class="field-help" role="status">Loading registry catalog…</p>
   {:else if catalog?.refreshedAt}
-    <label class="field"><span>Filter repositories</span><input bind:value={filter} placeholder="Search by repository path" /></label>
+    {#if visible.length || filter}
+      <label class="field"><span>Filter repositories</span>
+        <input bind:value={filter} placeholder="Search by repository path" disabled={busy}
+          onkeydown={(event) => { if (event.key === 'Enter') event.preventDefault(); }} />
+      </label>
+    {/if}
     <div class="form-grid">
       <label class="field"><span>Repository</span>
-        <select bind:value={repository}>
+        <select value={repository} disabled={busy || (!visible.length && !repository)} onchange={(event) => {
+          repository = event.currentTarget.value;
+          select('');
+        }}>
           <option value="">Choose a repository</option>
           {#if repository && !visible.includes(repository)}<option value={repository}>{repository}</option>{/if}
           {#each visible as image (image)}<option value={image}>{image}</option>{/each}
@@ -79,11 +91,11 @@
         {/if}
       </label>
       <label class="field"><span>Tag</span>
-        <select bind:value={tag} disabled={!tags.length} onchange={(event) => {
-          const value = event.currentTarget.value;
-          if (repository) select(value ? repository + ':' + value : repository);
+        <select value={tag} disabled={busy || loadingTags || !tags.length} onchange={(event) => {
+          tag = event.currentTarget.value;
+          select(tag ? selectedRepository + ':' + tag : '');
         }}>
-          <option value="">{loadingTags ? 'Loading tags…' : 'Choose a tag'}</option>
+          <option value="">{!repository ? 'Choose a repository first' : loadingTags ? 'Loading tags…' : 'Choose a tag'}</option>
           {#each tags as value (value)}<option value={value}>{value}</option>{/each}
         </select>
         {#if repository && !loadingTags && !tags.length && !tagsIssue}<small>No tags were listed for this repository.</small>{/if}
@@ -95,9 +107,6 @@
   {/if}
   {#if catalogIssue || catalog?.error || tagsIssue}
     <div class="notice warning" role="status">{catalogIssue || catalog?.error || tagsIssue}</div>
-  {/if}
-  {#if (!loading && (!visible.length || catalogIssue || catalog?.error)) || (repository && !loadingTags && !tags.length)}
-    <div class="inline-input"><button type="button" class="button secondary" onclick={enterReference}>Enter image tag or digest</button></div>
   {/if}
 </div>
 

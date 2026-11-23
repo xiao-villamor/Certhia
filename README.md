@@ -17,20 +17,27 @@ You need Docker and the Compose plugin.
 ```sh
 git clone https://github.com/xiao-villamor/Certhia.git
 cd Certhia
+```
+
+**Trivy only**
+
+```sh
 docker compose up -d --build --wait
 ```
 
-1. Open <http://localhost:3001> and create the first administrator.
-2. Select **Start scan**, choose **Registry image**, and enter `alpine:3.22`.
-3. Open the completed report to review findings or download an SBOM. Use **Report comparison** once you have a second report.
-
-Compose starts Certhia and PostgreSQL 17 and publishes the dashboard on loopback. The default image includes Trivy and Skopeo. Trivy downloads its vulnerability database on the first scan. Set `CERTHIA_PORT` to change the host port.
-
-To include Grype, Syft, Dockle, OSV-Scanner, and Dive, build with the scanner override.
+**All scanner providers**
 
 ```sh
 docker compose -f compose.yaml -f compose.scanners.yaml up -d --build --wait
 ```
+
+`compose.scanners.yaml` adds Grype, Syft, Dockle, OSV-Scanner, and Dive alongside Trivy. Use it for a fresh install or to add providers to an existing Compose installation. Keep the same project name and any existing override files. List `compose.scanners.yaml` after any override that changes the app’s build target.
+
+1. Open <http://localhost:3001> and create the first administrator.
+2. Choose default providers during setup or later in **Workspace preferences → Scanner providers**. For one scan, select providers under **Scan options**.
+3. Select **Start scan**, choose **Registry image**, and enter `alpine:3.22`. Open the completed report to review findings or download an SBOM.
+
+Compose starts Certhia and PostgreSQL 17 on loopback. Set `CERTHIA_PORT` to change the host port. The first build compiles the Rust backend, builds the web app, and downloads the tools for the selected image. Later builds reuse Docker’s build cache. Trivy and Grype can also download their vulnerability databases on first use.
 
 For a shared instance, configure [HTTPS, roles, and OIDC](docs/auth.md). See [deployment options](#optional-deployment-features) for Docker, Kubernetes, and S3.
 

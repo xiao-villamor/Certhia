@@ -1,8 +1,10 @@
 FROM node:24-alpine AS web
 WORKDIR /build
 COPY web/package.json web/package-lock.json ./
-RUN npm ci --no-audit --no-fund
-COPY web/ .
+RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
+COPY web/tsconfig.json web/vite.config.ts ./
+COPY web/src ./src
+COPY web/static ./static
 RUN npm run build
 
 FROM rust:1.98-alpine@sha256:7cc1c22d77d9432f7fe012a70e6d3e555af54c2a6832700ed7d553f1769ae89f AS backend
@@ -11,7 +13,7 @@ WORKDIR /build
 COPY backend/Cargo.toml backend/Cargo.lock ./
 COPY backend/migrations ./migrations
 COPY backend/.sqlx ./.sqlx
-ENV SQLX_OFFLINE=true
+ENV SQLX_OFFLINE=true CARGO_PROFILE_RELEASE_INCREMENTAL=true
 ARG CERTHIA_CARGO_FEATURES=""
 COPY backend/benches ./benches
 COPY backend/src ./src
@@ -21,7 +23,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 
 FROM ghcr.io/aquasecurity/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb AS trivy
 
-FROM alpine:3.24 AS runtime
+FROM alpine:3.24 AS runtime-base
 LABEL org.opencontainers.image.title="Certhia"
 RUN apk add --no-cache ca-certificates skopeo \
     && addgroup -S -g 10001 certhia \
@@ -29,9 +31,7 @@ RUN apk add --no-cache ca-certificates skopeo \
     && mkdir -p /data/tmp \
     && chown -R certhia:certhia /data \
     && chmod 700 /data /data/tmp
-COPY --from=trivy /usr/local/bin/trivy /usr/local/bin/trivy
-COPY --from=backend /build/digestdesk /usr/local/bin/digestdesk
-COPY --from=web /build/build /app/web
+COPY --link --from=trivy /usr/local/bin/trivy /usr/local/bin/trivy
 ENV CERTHIA_BIND=0.0.0.0:8080 CERTHIA_DATA_DIR=/data CERTHIA_WEB_DIR=/app/web HOME=/data TMPDIR=/data/tmp
 USER certhia
 EXPOSE 8080
@@ -41,13 +41,19 @@ ENTRYPOINT ["/usr/local/bin/digestdesk"]
 
 FROM moby/buildkit:v0.28.0@sha256:37539dd4d60fc70968d164d3850d903a2c56f6402214a1953fbf9fcb81ada731 AS buildkit
 
+FROM runtime-base AS runtime
+COPY --link --from=backend /build/digestdesk /usr/local/bin/digestdesk
+COPY --link --from=web /build/build /app/web
+
 FROM runtime AS production
 
-FROM production AS integrations
+FROM runtime-base AS integrations
 USER root
 RUN apk add --no-cache kubectl
-COPY --from=buildkit /usr/bin/buildctl /usr/local/bin/buildctl
+COPY --link --from=buildkit /usr/bin/buildctl /usr/local/bin/buildctl
 USER certhia
+COPY --link --from=backend /build/digestdesk /usr/local/bin/digestdesk
+COPY --link --from=web /build/build /app/web
 
 FROM --platform=$BUILDPLATFORM alpine:3.24 AS scanner-downloads
 ARG TARGETARCH
@@ -94,6 +100,6 @@ RUN set -eux; \
     esac
 
 FROM integrations AS scanners
-COPY --from=scanner-downloads /scanners/ /usr/local/bin/
+COPY --link --from=scanner-downloads /scanners/ /usr/local/bin/
 
 FROM production AS default

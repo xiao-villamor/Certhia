@@ -41,6 +41,7 @@ pub fn routes() -> Router<App> {
         .route("/registries/{id}/test", axum::routing::post(test_saved))
         .route("/registries/{id}", axum::routing::put(update))
         .route("/discover/dockerhub", route_get(dockerhub))
+        .route("/discover/dockerhub/tags", route_get(dockerhub_tags))
 }
 
 #[derive(Deserialize, Default)]
@@ -788,6 +789,38 @@ async fn tags(
         .json()
         .await
         .map_err(|_| ApiError::bad("The registry returned invalid tags."))?;
+    Ok(Json(
+        json!({"tags":data["tags"].as_array().cloned().unwrap_or_default()}),
+    ))
+}
+
+async fn dockerhub_tags(Query(query): Query<Tags>) -> ApiResult<Json<Value>> {
+    let reference =
+        ImageReference::parse(&query.image, Some("docker.io")).map_err(ApiError::bad)?;
+    let image = crate::operations::repository(&reference.value)
+        .strip_prefix("docker.io/")
+        .expect("canonical Docker Hub reference");
+    let connection = Connection {
+        host: "docker.io".into(),
+        auth_host: None,
+        auth: None,
+        protocol: "https".into(),
+        skip_tls: false,
+        provider: "dockerhub".into(),
+        namespace: None,
+    };
+    let response = get(
+        &connection,
+        &format!("/v2/{image}/tags/list"),
+        &[("n", "1000")],
+        OciOperation::Tags,
+    )
+    .await
+    .map_err(ApiError::bad)?;
+    let data: Value = response
+        .json()
+        .await
+        .map_err(|_| ApiError::bad("Docker Hub returned invalid tags."))?;
     Ok(Json(
         json!({"tags":data["tags"].as_array().cloned().unwrap_or_default()}),
     ))

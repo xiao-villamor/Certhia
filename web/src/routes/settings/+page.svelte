@@ -10,6 +10,7 @@
   import ImageWatches from '#lib/ImageWatches.svelte';
   import ReportBrandingSettings from '#lib/ReportBrandingSettings.svelte';
   import { api, message, post, scannerProviders, type ScannerAvailability } from '#lib/api.js';
+  import ScannerInstallHelp from '#lib/ScannerInstallHelp.svelte';
 
   interface Preferences {
     scanDays: number;
@@ -279,10 +280,8 @@
                 {#if scannerAccess.registry.some(engine => !scannerAccess?.local.includes(engine))}
                   Local scans use Trivy if none of the selected providers can run locally.
                 {/if}
-                {#if scannerAccess.registry.length < scannerProviders.length}
-                  The standard Docker image includes the additional providers.
-                {/if}
               </p>
+              {#if scannerAccess.registry.length < scannerProviders.length}<ScannerInstallHelp />{/if}
             </div>
             {@render saveBar(scannerDirty, scannerBusy, scannerNotice, scannerBusy ? 'Saving…' : 'Save scanner defaults', discardScanners, unavailableSelected)}
           </form>

@@ -2,7 +2,7 @@ use crate::{ApiError, ApiResult, App, ScanInput, image_target, scanner::Credenti
 use anyhow::Result;
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::{get, post},
 };
@@ -18,6 +18,8 @@ pub fn routes() -> Router<App> {
     Router::new()
         .route("/scheduled-scans", get(schedules).post(create))
         .route("/scheduled-scans/history", get(history))
+        .route("/scheduled-scans/preview", get(preview))
+        .route("/scheduled-scans/kubernetes", get(kubernetes_connection))
         .route(
             "/scheduled-scans/{id}",
             axum::routing::put(update).delete(remove),
@@ -102,6 +104,27 @@ fn next(expression: &str) -> Result<String> {
         .to_rfc3339_opts(SecondsFormat::Secs, true))
 }
 
+#[derive(Deserialize)]
+struct CronPreview {
+    expression: String,
+}
+
+async fn preview(Query(input): Query<CronPreview>) -> ApiResult<Json<Value>> {
+    Ok(Json(
+        json!({"dueAt":next(&input.expression).map_err(ApiError::bad)?}),
+    ))
+}
+
+#[derive(Deserialize)]
+struct KubernetesConnection {
+    namespace: Option<String>,
+}
+
+async fn kubernetes_connection(Query(input): Query<KubernetesConnection>) -> ApiResult<StatusCode> {
+    crate::discovery::kube_pods(input.namespace.as_deref()).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn schedules(
     State(app): State<App>,
     axum::extract::Query(page): axum::extract::Query<crate::IdPage>,
@@ -177,6 +200,9 @@ async fn write(app: &App, id: String, input: ScheduleInput, existing: bool) -> A
                 selection.kubernetes_namespace.as_deref().map(str::trim),
             )?
             .map(str::to_owned);
+            if input.enabled {
+                crate::discovery::kube_pods(selection.kubernetes_namespace.as_deref()).await?;
+            }
             selection.references.clear();
             if let Some(id) = &input.scan.registry_id {
                 selection.kubernetes_host = Some(
@@ -362,7 +388,21 @@ async fn enqueue(app: &App, id: &str, manual: bool) -> ApiResult<Option<Run>> {
     }
     let specific = matches!(item.selection.mode, Mode::Specific);
     let kubernetes = if matches!(item.selection.mode, Mode::Kubernetes) {
-        Some(kubernetes_targets(&mut tx, key, &item).await?)
+        match kubernetes_targets(&mut tx, key, &item).await {
+            Ok(targets) => Some(targets),
+            Err(error)
+                if error.0.is_client_error() || error.0 == StatusCode::SERVICE_UNAVAILABLE =>
+            {
+                sqlx::query("UPDATE schedule_runs SET error=$2 WHERE id=$1")
+                    .bind(run)
+                    .bind(&error.1)
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        }
     } else {
         None
     };
@@ -539,11 +579,13 @@ async fn history(
         .transpose()
         .map_err(ApiError::bad)?;
     let (run, scan) = before.unzip();
-    let rows=sqlx::query_scalar!(r#"SELECT jsonb_build_object('id',h.id,'name',h.name,'scanId',r.scan_id,'createdAt',h.created_at,'trigger',h.trigger,
-        'status',CASE WHEN r.scan_id IS NULL THEN 'no_matches' ELSE coalesce(s.status,'removed') END) AS "entry!"
+    let rows=sqlx::query_scalar::<_, Value>(r#"SELECT jsonb_build_object('id',h.id,'name',h.name,'scanId',r.scan_id,'createdAt',h.created_at,'trigger',h.trigger,
+        'error',coalesce(h.error,s.error),
+        'status',CASE WHEN h.error IS NOT NULL THEN 'failed' WHEN r.scan_id IS NULL THEN 'no_matches' ELSE coalesce(s.status,'removed') END)
         FROM schedule_runs h LEFT JOIN schedule_run_scans r ON r.run_id=h.id LEFT JOIN scan_directory d ON d.id=r.scan_id LEFT JOIN scans s ON s.id=d.id AND s.queued_at=d.queued_at
         WHERE ($1::uuid IS NULL OR (h.id,coalesce(r.scan_id,'00000000-0000-0000-0000-000000000000'))<($1,$2))
-        AND ($3::uuid IS NULL OR h.id=$3) ORDER BY h.id DESC,r.scan_id DESC LIMIT $4"#,run,scan,q.run,limit+1).fetch_all(&app.0.database.primary).await?;
+        AND ($3::uuid IS NULL OR h.id=$3) ORDER BY h.id DESC,r.scan_id DESC LIMIT $4"#)
+        .bind(run).bind(scan).bind(q.run).bind(limit+1).fetch_all(&app.0.database.primary).await?;
     crate::page_rows(rows, limit, |v| {
         json!([
             v["id"],

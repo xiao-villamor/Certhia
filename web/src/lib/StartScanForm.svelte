@@ -1,14 +1,15 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
   import ConfigDialog from '#lib/ConfigDialog.svelte';
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import { uniqueSwarmImages, type SwarmImage } from '#lib/swarm-discovery.js';
+  import { archiveReference } from '#lib/archive-reference.js';
   import { trivyImportDetails } from '#lib/trivy-import.js';
   import RegistryCatalogPicker from '#lib/RegistryCatalogPicker.svelte';
-  import { api, message, platforms, post, scannerProviders, type Registry, type ScannerAvailability, allRegistries } from '#lib/api.js';
+  import { api, message, platforms, post, scannerName, scannerProviders, type Registry, type ScannerAvailability, type ScanRetryOptions, allRegistries } from '#lib/api.js';
 
-  let { initialMode = 'registry', initialReference = '', initialRegistry = '', dismiss }:
-    { initialMode?: string; initialReference?: string; initialRegistry?: string; dismiss?: () => void } = $props();
+  let { initialMode = 'registry', initialReference = '', initialRegistry = '', retryOptions, dismiss }:
+    { initialMode?: string; initialReference?: string; initialRegistry?: string; retryOptions?: ScanRetryOptions; dismiss?: () => void } = $props();
   const uid = $props.id();
   let selectedMode = $state<string>();
   const mode = $derived(selectedMode ?? initialMode);
@@ -28,6 +29,7 @@
   let registries = $state<Registry[]>([]);
   let reference = $state('');
   let referenceInput = $state<HTMLInputElement>();
+  let manualRegistryReference = $state(false);
   type ImageUsage = {
     namespace: string;
     pod: string;
@@ -59,9 +61,21 @@
   });
   const bulkSelected = $derived(scanAll && (mode === 'docker' || mode === 'swarm'));
   let discoveryRequest: AbortController | undefined;
+  let tagsRequest: AbortController | undefined;
+  let archiveRequest: AbortController | undefined;
+  let hubImage = $state('');
+  let hubTags = $state<string[]>([]);
+  let hubTagsLoading = $state(false);
+  let hubTagsError = $state('');
+  let archiveSuggestion = $state('');
 
   function resetLookup() {
     discoveryRequest?.abort();
+    tagsRequest?.abort();
+    hubImage = '';
+    hubTags = [];
+    hubTagsError = '';
+    hubTagsLoading = false;
     discovered = [];
     lookup = 'idle';
     lookupError = '';
@@ -74,16 +88,53 @@
     pickedImage = '';
   }
 
+  function changeRegistry(next: string) {
+    registryId = next;
+    if (mode !== 'registry') return;
+    clearPickedImage();
+    manualRegistryReference = !!reference.trim();
+    resetLookup();
+    error = '';
+  }
+
+  function pickRegistryReference(image: string) {
+    reference = image;
+    pickedImage = image;
+    error = '';
+  }
+
+  async function enterRegistryReference(suggestion: string) {
+    pickRegistryReference(reference || suggestion);
+    manualRegistryReference = true;
+    await tick();
+    referenceInput?.focus();
+  }
+
+  async function browseRegistry() {
+    pickRegistryReference('');
+    manualRegistryReference = false;
+    await tick();
+    manualRegistryButton?.focus();
+  }
+
+  let manualRegistryButton = $state<HTMLButtonElement>();
+
   $effect(() => {
     initialMode;
     selectedMode = undefined;
     reference = initialReference;
     registryId = initialRegistry;
+    manualRegistryReference = !!initialReference.trim();
+    platform = retryOptions?.platform ?? 'linux/amd64';
+    scanners = retryOptions?.scanners ?? [];
+    priority = retryOptions?.priority ?? 0;
   });
 
   $effect(() => {
     mode;
     resetLookup();
+    archiveRequest?.abort();
+    archiveSuggestion = '';
     pickedImage = '';
     file = undefined;
     readingReport = false;
@@ -122,12 +173,53 @@
       lookup = 'failed';
     }
   }
+  async function pickImage(value: string) {
+    pickedImage = value;
+    if (value) reference = value;
+    if (mode !== 'registry') return;
+    tagsRequest?.abort();
+    hubImage = value;
+    hubTags = [];
+    hubTagsError = '';
+    hubTagsLoading = !!value;
+    if (!value) return;
+    const controller = new AbortController();
+    tagsRequest = controller;
+    try {
+      const data = await api<{tags:string[]}>('/discover/dockerhub/tags?' + new URLSearchParams({image:value}), {signal:controller.signal});
+      if (!controller.signal.aborted) hubTags = data.tags;
+    } catch (issue) {
+      if (!controller.signal.aborted) hubTagsError = message(issue);
+    } finally {
+      if (!controller.signal.aborted) hubTagsLoading = false;
+    }
+  }
+
+  async function readArchive(upload: File | undefined) {
+    archiveRequest?.abort();
+    if (archiveSuggestion && reference === archiveSuggestion) reference = '';
+    archiveSuggestion = '';
+    file = upload;
+    if (!upload) return;
+    const controller = new AbortController();
+    archiveRequest = controller;
+    try {
+      const suggested = await archiveReference(upload, controller.signal);
+      if (!controller.signal.aborted && suggested) {
+        archiveSuggestion = suggested;
+        if (!reference.trim()) reference = suggested;
+      }
+    } catch { /* Reference entry remains available if the archive does not contain a readable tag. */ }
+  }
   let platform = $state('linux/amd64');
   let registryId = $state('');
   let engines = $state<ScannerAvailability>({registry:['trivy'],local:['trivy'],defaults:null});
   let scanners = $state<string[]>([]);
   let priority = $state(0);
   const enginesForImage = $derived(mode === 'docker' || archive ? engines.local : engines.registry);
+  const chosenEngines = $derived(scanners.filter(scanner => enginesForImage.includes(scanner)));
+  const workspaceEngines = $derived((engines.defaults ?? []).filter(scanner => enginesForImage.includes(scanner)));
+  const effectiveEngines = $derived(chosenEngines.length ? chosenEngines : workspaceEngines.length ? workspaceEngines : ['trivy']);
   let file = $state<File>();
   let readingReport = $state(false);
   let importReference = $state('');
@@ -156,24 +248,32 @@
   let busy = $state(false);
   let error = $state('');
   let registryError = $state('');
+  let loadingRegistries = $state(true);
   const registry = $derived(registries.find((entry) => entry.id === registryId));
+  const savedRegistryFlow = $derived(mode === 'registry' && !!registryId);
+  const registryTargetPending = $derived(savedRegistryFlow && (!registry || !manualRegistryReference && !reference));
 
   function changeSource(next: string) {
     clearPickedImage();
-    if (dismiss) selectedMode = next;
+    if (dismiss || retryOptions) selectedMode = next;
     else void goto(next === 'registry' ? '/scans/new' : '/scans/new?mode=' + next);
   }
 
-  onDestroy(() => discoveryRequest?.abort());
+  onDestroy(() => {
+    discoveryRequest?.abort();
+    tagsRequest?.abort();
+    archiveRequest?.abort();
+  });
 
   onMount(() => {
     void api<ScannerAvailability>('/scanners/available').then(result => {engines = result;}).catch(() => {});
-    void allRegistries().then(items => { registries = items; }).catch(issue => { registryError = message(issue); });
+    void allRegistries().then(items => { registries = items; }).catch(issue => { registryError = message(issue); })
+      .finally(() => { loadingRegistries = false; });
   });
 
   async function submit(event: SubmitEvent) {
     event.preventDefault();
-    if (busy || readingReport) return;
+    if (busy || readingReport || registryTargetPending) return;
     busy = true;
     error = '';
     try {
@@ -241,14 +341,30 @@
       : 'No images found. You can enter an image reference manually.'}</p>
   {:else if discovered.length}
     <label class="field"><span>{mode === 'kubernetes' ? 'Pod images' : mode === 'swarm' ? 'Service images' : 'Discovered images'} ({discovered.length})</span>
-      <select value={discovered.some(item => item.reference === reference) ? reference : ''}
-        onchange={(event) => { pickedImage = event.currentTarget.value; reference = pickedImage; }}>
+      <select value={mode === 'registry' ? hubImage : discovered.some(item => item.reference === reference) ? reference : ''}
+        onchange={(event) => void pickImage(event.currentTarget.value)}>
         <option value="">Choose an image</option>
         {#each discovered as item}
           <option value={item.reference}>{item.label}{item.running ? ' (running)' : ''} · {item.reference}</option>
         {/each}
       </select>
     </label>
+    {#if mode === 'registry' && hubImage}
+      {#if hubTagsLoading}<p class="field-help" role="status">Loading Docker Hub tags…</p>
+      {:else if hubTagsError}<p class="field-help" role="status">{hubTagsError} Enter a tag in Image reference.</p>
+      {:else if hubTags.length}
+        {@const repository = hubImage.split(':')[0]}
+        <label class="field"><span>Docker Hub tag</span>
+          <select value={reference.startsWith(repository + ':') ? reference.slice(repository.length + 1) : ''}
+            onchange={(event) => {
+              if (event.currentTarget.value) { reference = repository + ':' + event.currentTarget.value; pickedImage = reference; }
+            }}>
+            <option value="">Choose a tag</option>
+            {#each hubTags as tag}<option value={tag}>{tag}</option>{/each}
+          </select>
+        </label>
+      {:else}<p class="field-help">No tags returned. You can enter an image reference.</p>{/if}
+    {/if}
     {#if mode === 'kubernetes' && selectedImage?.usages?.length}
       <details class="form-disclosure">
         <summary>Pods and workloads using this image</summary>
@@ -277,6 +393,16 @@
       {/if}
     {/if}
   {/if}
+{/snippet}
+
+{#snippet referenceField()}
+  <label class="field">
+    <span>Image reference</span>
+    <input class="mono" required={!bulkSelected} disabled={bulkSelected || busy} maxlength="1024"
+      placeholder={registry ? 'team/image:version' : 'registry.example.com/team/image:version'}
+      bind:this={referenceInput} bind:value={reference} oninput={() => { pickedImage = ''; }} />
+    {#if savedRegistryFlow && registry}<small>Enter a repository with its tag or digest. References without a hostname use {registry.host}.</small>{/if}
+  </label>
 {/snippet}
 
 {#snippet fields()}
@@ -332,35 +458,43 @@
       </div>
       {@render imageChoices()}
     {/if}
-    <label class="field">
-      <span>Image reference {#if registry}<small>{registry.host}</small>{/if}</span>
-      <input class="mono" required={!bulkSelected} disabled={bulkSelected} maxlength="1024" placeholder={registry ? 'team/image:version' : 'registry.example.com/team/image:version'} bind:this={referenceInput} bind:value={reference} />
-    </label>
     <div class="form-grid" class:single-field={!showRegistry}>
-      <label class="field">
-        <span>Platform</span>
-        <select bind:value={platform}>{#each platforms as value}<option>{value}</option>{/each}</select>
-      </label>
       {#if showRegistry}
         <label class="field"><span>Registry connection</span>
-          <select bind:value={registryId} onchange={() => { if (mode === 'registry') resetLookup(); }}>
+          <select value={registryId} disabled={loadingRegistries || busy} onchange={(event) => changeRegistry(event.currentTarget.value)}>
             <option value="">Public or anonymous registry</option>
+            {#if registryId && !registry}
+              <option value={registryId} disabled>{loadingRegistries ? 'Loading registry connection…' : 'Registry connection unavailable'}</option>
+            {/if}
             {#each registries as item (item.id)}<option value={item.id}>{item.name} · {item.host}</option>{/each}
           </select>
         </label>
       {/if}
+      <label class="field">
+        <span>Platform</span>
+        <select bind:value={platform}>{#each platforms as value}<option>{value}</option>{/each}</select>
+      </label>
     </div>
     {#if showRegistry}
       {#if registryError}<div class="notice error" role="alert">{registryError}</div>{/if}
-      {#if !registries.length && !registryError}
+      {#if !loadingRegistries && !registries.length && !registryError}
         <p class="field-help"><a href="/registries">Add a registry connection</a> for images that require authentication.</p>
       {/if}
     {/if}
-    {#if mode === 'registry' && registry}
-      {#key registry.id}
-        <RegistryCatalogPicker {registry} select={(image) => {reference = image;}} enterReference={() => referenceInput?.focus()} />
-      {/key}
+    {#if savedRegistryFlow}
+      {#if registry && manualRegistryReference}
+        {@render referenceField()}
+        <div><button type="button" class="button secondary" disabled={busy} onclick={browseRegistry}>Browse repositories</button></div>
+      {:else if registry}
+        {#key registry.id}
+          <RegistryCatalogPicker {registry} {busy} bind:manualButton={manualRegistryButton}
+            select={pickRegistryReference} enterReference={enterRegistryReference} />
+        {/key}
+      {:else if !loadingRegistries && !registryError}
+        <p class="field-help">Choose an available registry connection.</p>
+      {/if}
     {:else if mode === 'registry'}
+      {@render referenceField()}
       <details class="form-disclosure">
         <summary>Search Docker Hub</summary>
         <div class="disclosure-body">
@@ -371,26 +505,31 @@
           {@render imageChoices()}
         </div>
       </details>
+    {:else}
+      {@render referenceField()}
     {/if}
     {#if archive}
       <label class="field">
         <span>Docker image archive</span>
-        <input type="file" required accept=".tar,.tar.gz,.tgz" onchange={(event) => { file = event.currentTarget.files?.[0]; }} />
+        <input type="file" required accept=".tar,.tar.gz,.tgz" onchange={(event) => void readArchive(event.currentTarget.files?.[0])} />
+        {#if archiveSuggestion && reference === archiveSuggestion}<small>Image reference suggested from the archive.</small>{/if}
       </label>
     {/if}
-      <details class="form-disclosure">
+      <details class="form-disclosure" open={!!retryOptions}>
         <summary>Scan options</summary>
         <div class="disclosure-body">
       {#if enginesForImage.length > 1}
-        <fieldset class="field"><legend>Scanners</legend><p class="field-help">Leave unchecked to use the <a href="/settings">workspace defaults</a>.</p>
+        <fieldset class="field"><legend>Scanners</legend><p class="field-help">Leave unchecked to use the <a href="/settings" target="_blank" rel="noopener">workspace defaults (new tab)</a>.</p>
         <div class="filters">{#each scannerProviders.filter(provider => enginesForImage.includes(provider.id)) as provider (provider.id)}
           <label class="inline-check"><input type="checkbox" value={provider.id} bind:group={scanners} />{provider.name}</label>
         {/each}</div>
         </fieldset>
       {/if}
+      {#if scanners.length > chosenEngines.length}<p class="field-help">Some previously selected engines are unavailable for this source.</p>{/if}
       <label class="field"><span>Queue priority</span><input type="number" min="-10" max="10" bind:value={priority} /></label>
         </div>
       </details>
+      <p class="field-help">{chosenEngines.length ? 'Selected scanners' : 'Effective workspace defaults'} · {effectiveEngines.map(scannerName).join(', ')}</p>
     {/if}
 {/snippet}
 
@@ -400,7 +539,7 @@
   {:else}
     <a class="button secondary" href="/">Cancel</a>
   {/if}
-  <button type="submit" class="button primary" disabled={busy || readingReport || (mode === 'swarm' && scanAll && !remainingSwarmTargets.length)}>{busy ? 'Submitting…' : importing ? 'Import report' : bulkSelected ? 'Start scans' : 'Start scan'}</button>
+  <button type="submit" class="button primary" disabled={busy || readingReport || registryTargetPending || (mode === 'swarm' && scanAll && !remainingSwarmTargets.length)}>{busy ? 'Submitting…' : importing ? 'Import report' : bulkSelected ? 'Start scans' : 'Start scan'}</button>
 {/snippet}
 
 {#if dismiss}

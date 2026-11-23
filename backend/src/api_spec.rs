@@ -239,6 +239,12 @@ pub fn document() -> Value {
         ("/scans", "post", "Scans", "Queue an image scan"),
         ("/scans/{id}", "get", "Scans", "Read a scan and its report"),
         (
+            "/scans/{id}/retry-options",
+            "get",
+            "Scans",
+            "Read the original scan inputs for an editable retry",
+        ),
+        (
             "/scans/{id}/rescan",
             "post",
             "Scans",
@@ -267,6 +273,24 @@ pub fn document() -> Value {
             "get",
             "Scans",
             "Download a report as PDF, XLSX, Markdown, JSON, raw, CycloneDX SBOM, SPDX 2.3 JSON, CycloneDX CBOM, OpenVEX, or ZIP",
+        ),
+        (
+            "/scans/{id}/report/summary",
+            "get",
+            "Scans",
+            "Read report metadata and finding totals by ecosystem and severity",
+        ),
+        (
+            "/scans/{id}/report/findings",
+            "get",
+            "Scans",
+            "Page through vulnerability findings with aliases, scanners, and tracking status",
+        ),
+        (
+            "/scans/{id}/report/scanner-differences",
+            "get",
+            "Scans",
+            "Page through scanner differences and read comparison totals on the first page",
         ),
         (
             "/scans/{id}/scanner-results",
@@ -321,13 +345,19 @@ pub fn document() -> Value {
             "/compare",
             "get",
             "Images",
-            "Compare vulnerability observations in two completed reports",
+            "Compare package inventories and vulnerability observations from shared scanners",
         ),
         (
             "/scans/{id}/previous",
             "get",
             "Scans",
             "Find the previous completed scan for the same image reference and platform",
+        ),
+        (
+            "/scans/{id}/previous-version",
+            "get",
+            "Scans",
+            "Suggest an earlier report in the same repository and platform",
         ),
         (
             "/compare/plan",
@@ -457,7 +487,25 @@ pub fn document() -> Value {
             "Discovery",
             "Discover images in Kubernetes pods",
         ),
+        (
+            "/discover/dockerhub/tags",
+            "get",
+            "Discovery",
+            "List tags for a public Docker Hub repository",
+        ),
         ("/scheduled-scans", "get", "Scheduling", "List schedules"),
+        (
+            "/scheduled-scans/preview",
+            "get",
+            "Scheduling",
+            "Validate a cron expression and preview its next run",
+        ),
+        (
+            "/scheduled-scans/kubernetes",
+            "get",
+            "Scheduling",
+            "Test Kubernetes pod access for a schedule",
+        ),
         (
             "/registries/{id}/webhook",
             "get",
@@ -577,6 +625,8 @@ pub fn document() -> Value {
             }
             "/images" => &["q", "status", "repository", "platform", "limit", "cursor"][..],
             "/scans/{id}/classifications" if method == "get" => &["finding", "limit", "cursor"][..],
+            "/scans/{id}/report/findings" => &["q", "advisory", "severity", "status", "groups", "collapsed", "limit", "cursor"],
+            "/scans/{id}/report/scanner-differences" => &["q", "status", "limit", "cursor"],
             "/compare" => &["baseline", "target", "publication"][..],
             "/scans/import" => &["reference", "platform"][..],
             "/scans/archive" => &["reference", "platform", "scanners", "priority"][..],
@@ -594,8 +644,10 @@ pub fn document() -> Value {
                 "cursor",
             ][..],
             "/discover/dockerhub" => &["q"][..],
-            "/registries/{id}/tags" => &["image"][..],
+            "/registries/{id}/tags" | "/discover/dockerhub/tags" => &["image"][..],
             "/discover/kubernetes" => &["namespace"][..],
+            "/scheduled-scans/kubernetes" => &["namespace"][..],
+            "/scheduled-scans/preview" => &["expression"][..],
             _ => &[],
         };
         parameters.extend(query.iter().map(|name| {
@@ -605,7 +657,11 @@ pub fn document() -> Value {
                     | ("/compare", "baseline" | "target")
                     | ("/scans/import" | "/scans/archive", "reference" | "platform")
                     | ("/discover/dockerhub", "q")
-                    | ("/registries/{id}/tags", "image")
+                    | ("/scheduled-scans/preview", "expression")
+                    | (
+                        "/registries/{id}/tags" | "/discover/dockerhub/tags",
+                        "image"
+                    )
             );
             let kind = match *name {
                 "limit" => "integer",
@@ -734,7 +790,9 @@ pub fn document() -> Value {
             }
             "/webhooks/registries/{id}/ci/{scan_id}" => {
                 operation["security"] = json!([{"RegistryWebhookToken":[]}]);
-                operation["description"] = json!("Available for 24 hours after the latest CI submission. Counts require a complete vulnerability observation.");
+                operation["description"] = json!(
+                    "Available for 24 hours after the latest CI submission. Counts require a complete vulnerability observation."
+                );
                 operation["responses"] = json!({
                     "200":{"description":"CI scan status and summary"},
                     "401":{"description":"Missing or invalid registry webhook token"},

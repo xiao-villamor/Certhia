@@ -21,6 +21,7 @@ mod pg_scans;
 mod postgres;
 mod registries;
 mod report_branding;
+mod report_pages;
 mod report_pdf;
 mod scanner;
 mod store;
@@ -497,9 +498,9 @@ async fn compare_scans(
         .scan(&input.target)
         .await?
         .ok_or_else(|| ApiError::missing("Target scan not found."))?;
-    if baseline.report.is_none() || target.report.is_none() {
-        return Err(ApiError::bad("Both scans must have completed reports."));
-    }
+    let incomplete = || ApiError::bad("Both scans must have completed reports.");
+    let mut before = baseline.report.ok_or_else(incomplete)?;
+    let mut after = target.report.ok_or_else(incomplete)?;
     if baseline.scan.platform != target.scan.platform {
         return Err(ApiError::bad("Choose two reports for the same platform."));
     }
@@ -512,14 +513,7 @@ async fn compare_scans(
         .fetch_optional(&app.0.database.primary).await?
         .ok_or_else(|| ApiError::missing("Publication and scan pair not found."))?;
         let digest = pinned.rsplit_once('@').map(|(_, digest)| digest);
-        if target.scan.reference != pinned
-            || digest.is_none()
-            || target
-                .report
-                .as_ref()
-                .and_then(|report| report.digest.as_deref())
-                != digest
-        {
+        if target.scan.reference != pinned || digest.is_none() || after.digest.as_deref() != digest {
             return Err(ApiError::bad(
                 "The target report does not confirm the published manifest digest.",
             ));
@@ -535,20 +529,32 @@ async fn compare_scans(
     } else {
         (None, Default::default())
     };
-    let trivy_only = publication.is_some();
-    let (before, after) = tokio::try_join!(
-        comparison::report(&app, &baseline, trivy_only),
-        comparison::report(&app, &target, trivy_only)
-    )?;
-    if before.1 != after.1 {
-        return Err(ApiError::bad(
-            "Choose reports with the same vulnerability scanners.",
-        ));
-    }
+    let (baseline_scanners, target_scanners) = if publication.is_some() {
+        (vec!["trivy"], vec!["trivy"])
+    } else {
+        (
+            comparison::engines(&before, &baseline.scan.source),
+            comparison::engines(&after, &target.scan.source),
+        )
+    };
+    let scanners = if publication.is_some() {
+        (before, after) = tokio::try_join!(
+            comparison::publication_report(&app, &baseline.scan, &before),
+            comparison::publication_report(&app, &target.scan, &after)
+        )?;
+        vec!["trivy"]
+    } else {
+        comparison::align_findings(
+            &app,
+            (&input.baseline, &mut before, &baseline_scanners),
+            (&input.target, &mut after, &target_scanners),
+        )
+        .await
+    };
     let selected = selected
         .into_iter()
         .map(|id| {
-            let detected = after.0.findings.iter().any(|finding| finding.id == id);
+            let detected = after.findings.iter().any(|finding| finding.id == id);
             json!({"id":id,"detected":detected})
         })
         .collect::<Vec<_>>();
@@ -557,8 +563,9 @@ async fn compare_scans(
         comparison::issues(&app, &input.target)
     )?;
     Ok(Json(json!({
-        "baseline":baseline.scan,"target":target.scan,"baselineDigest":before.0.digest,
-        "targetDigest":after.0.digest,"scanners":before.1,"changes":compare(&before.0,&after.0),
+        "baseline":baseline.scan,"target":target.scan,"baselineDigest":before.digest,
+        "targetDigest":after.digest,"scanners":scanners,"changes":compare(&before,&after),
+        "baselineScanners":baseline_scanners,"targetScanners":target_scanners,
         "publication":publication,"selected":selected,"baselineIssues":before_issues,"targetIssues":after_issues
     })))
 }
@@ -781,6 +788,7 @@ fn api_routes() -> Router<App> {
         .route("/scans/{id}", get(scan_detail))
         .route("/compare", get(compare_scans))
         .merge(operations::routes())
+        .merge(report_pages::routes())
         .merge(discovery::routes())
         .merge(automation::routes())
         .merge(report_branding::routes())
