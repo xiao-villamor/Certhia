@@ -342,17 +342,10 @@ pub enum Target<'a> {
 pub async fn scan(
     target: Target<'_>,
     platform: &str,
-    credentials: Option<Credentials>,
     cache: &Path,
     activity: Activity<'_>,
 ) -> Result<Captured> {
     let directory = tempfile::tempdir()?;
-    let host = match &target {
-        Target::Remote(reference, _) => reference.host.as_str(),
-        _ => "",
-    };
-    let credentials = crate::registries::pull_credentials(host, credentials).await?;
-    docker_config(&directory.path().join("config.json"), host, credentials)?;
     let output = directory.path().join("report.json");
     let mut command = Command::new("trivy");
     command
@@ -381,21 +374,7 @@ pub async fn scan(
         .arg("--output")
         .arg(&output);
     match target {
-        Target::Remote(reference, insecure) => {
-            activity
-                .record(
-                    "image",
-                    "Reading registry image",
-                    "Trivy is retrieving the image metadata and layers for the selected platform.",
-                )
-                .await;
-            if insecure {
-                command.arg("--insecure");
-            }
-            command
-                .args(["--image-src", "remote", "--"])
-                .arg(&reference.value);
-        }
+        Target::Remote(..) => bail!("Prepare the registry image archive before running Trivy."),
         Target::Docker(reference) => {
             activity
                 .record(
@@ -416,7 +395,7 @@ pub async fn scan(
                 .record(
                     "image",
                     "Reading image archive",
-                    "Trivy is opening the uploaded archive and its layers.",
+                    "Trivy is opening the local archive and its layers.",
                 )
                 .await;
             command.arg("--input").arg(path);
@@ -446,9 +425,13 @@ pub async fn scan(
     if tokio::fs::metadata(&output).await?.len() > MAX_REPORT_BYTES as u64 {
         bail!("The scanner report exceeds the 20 MB limit.");
     }
-    let mut captured = Captured::from_trivy(&tokio::fs::read(output).await?)?;
-    crate::artifacts::record_trivy(&mut captured);
-    Ok(captured)
+    let bytes = tokio::fs::read(output).await?;
+    tokio::task::spawn_blocking(move || {
+        let mut captured = Captured::from_trivy(&bytes)?;
+        crate::artifacts::record_trivy(&mut captured);
+        Ok(captured)
+    })
+    .await?
 }
 
 pub fn scan_timeout() -> Duration {

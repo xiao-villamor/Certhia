@@ -134,6 +134,7 @@ fn inventory_origins(trivy: &Value, sbom: Option<&Value>) -> Result<Origins> {
 fn trivy_rows(report: &Value, origins: &Origins) -> Result<Vec<Observation>> {
     let mut rows = Vec::new();
     for target in items(&report["Results"]) {
+        let ecosystem = ecosystem(target["Type"].as_str().unwrap_or_default(), "");
         for vuln in items(&target["Vulnerabilities"]) {
             let advisory = string(vuln, "VulnerabilityID");
             let package = string(vuln, "PkgName");
@@ -146,10 +147,9 @@ fn trivy_rows(report: &Value, origins: &Origins) -> Result<Vec<Observation>> {
                 &advisory,
                 items(&vuln["VendorIDs"]).filter_map(Value::as_str),
             );
-            let eco = ecosystem(&string(target, "Type"), "");
             let purl = string(&vuln["PkgIdentifier"], "PURL");
             let mut source_packages = BTreeSet::new();
-            if eco == "alpine" {
+            if ecosystem == "alpine" {
                 source_packages.extend(
                     origins
                         .get(&(package.clone(), version.clone()))
@@ -165,10 +165,10 @@ fn trivy_rows(report: &Value, origins: &Origins) -> Result<Vec<Observation>> {
                 aliases,
                 package,
                 version,
-                ecosystem: eco,
+                ecosystem: ecosystem.clone(),
                 purl,
                 source_packages,
-                severity: string(vuln, "Severity").to_uppercase(),
+                severity: vuln["Severity"].as_str().unwrap_or_default().to_uppercase(),
                 fixes: fixes(vuln["FixedVersion"].as_str().into_iter()),
                 cpe_match: false,
             });
@@ -181,6 +181,7 @@ fn trivy_rows(report: &Value, origins: &Origins) -> Result<Vec<Observation>> {
 
 fn grype_rows(report: &Value) -> Result<Vec<Observation>> {
     let mut rows = Vec::new();
+    let distro = report["distro"]["name"].as_str().unwrap_or_default();
     for entry in items(&report["matches"]) {
         let artifact = &entry["artifact"];
         let vuln = &entry["vulnerability"];
@@ -195,10 +196,7 @@ fn grype_rows(report: &Value) -> Result<Vec<Observation>> {
             &advisory,
             items(&entry["relatedVulnerabilities"]).filter_map(|v| v["id"].as_str()),
         );
-        let eco = ecosystem(
-            &string(artifact, "type"),
-            &string(&report["distro"], "name"),
-        );
+        let eco = ecosystem(artifact["type"].as_str().unwrap_or_default(), distro);
         let purl = string(artifact, "purl");
         let mut source_packages = BTreeSet::new();
         if eco == "alpine" {
@@ -230,7 +228,7 @@ fn grype_rows(report: &Value) -> Result<Vec<Observation>> {
             purl,
             source_packages,
             cpe_match,
-            severity: string(vuln, "severity").to_uppercase(),
+            severity: vuln["severity"].as_str().unwrap_or_default().to_uppercase(),
             fixes: fixes(items(&vuln["fix"]["versions"]).filter_map(Value::as_str)),
         });
     }
@@ -442,6 +440,32 @@ fn osv_rows(report: &Value) -> Result<Vec<Observation>> {
     Ok(rows)
 }
 
+fn candidate_keys<'a>(
+    row: &'a Observation,
+    identity: &'a str,
+) -> impl Iterator<Item = (&'a str, &'a str, &'a str, &'a str)> {
+    let advisory = row.advisory.as_str();
+    let package = row.package.as_str();
+    std::iter::once(identity)
+        .chain((advisory != identity).then_some(advisory))
+        .chain(
+            row.aliases
+                .iter()
+                .map(String::as_str)
+                .filter(move |&alias| alias != identity && alias != advisory),
+        )
+        .flat_map(move |id| {
+            std::iter::once(package)
+                .chain(
+                    row.source_packages
+                        .iter()
+                        .map(String::as_str)
+                        .filter(move |&source| source != package),
+                )
+                .map(move |name| (id, row.ecosystem.as_str(), row.version.as_str(), name))
+        })
+}
+
 fn reconcile(rows: [Vec<Observation>; 3], engines: &[usize], target: &'static str) -> Explanation {
     let mut observations: Vec<_> = rows
         .into_iter()
@@ -475,37 +499,24 @@ fn reconcile(rows: [Vec<Observation>; 3], engines: &[usize], target: &'static st
     let mut index = HashMap::<_, Vec<usize>>::with_capacity(observations.len());
     for (i, (_, row)) in observations.iter().enumerate() {
         let row = row.as_ref().unwrap();
-        for id in std::iter::once(identities[i])
-            .chain(std::iter::once(&row.advisory))
-            .chain(&row.aliases)
-        {
-            for name in std::iter::once(&row.package).chain(&row.source_packages) {
-                index
-                    .entry((id, &row.ecosystem, &row.version, name))
-                    .or_default()
-                    .push(i);
-            }
+        for key in candidate_keys(row, identities[i]) {
+            index.entry(key).or_default().push(i);
         }
     }
     let mut edges = Vec::with_capacity(observations.len());
     for (i, (engine, row)) in observations.iter().enumerate() {
         let row = row.as_ref().unwrap();
         let mut candidates = BTreeSet::new();
-        for id in std::iter::once(identities[i])
-            .chain(std::iter::once(&row.advisory))
-            .chain(&row.aliases)
-        {
-            for name in std::iter::once(&row.package).chain(&row.source_packages) {
-                if let Some(matches) = index.get(&(id, &row.ecosystem, &row.version, name)) {
-                    candidates.extend(matches.iter().copied().filter(|&j| {
-                        let (peer, other) = &observations[j];
-                        let other = other.as_ref().unwrap();
-                        let conflicting_cves = identities[i].starts_with("CVE-")
-                            && identities[j].starts_with("CVE-")
-                            && identities[i] != identities[j];
-                        peer != engine && !conflicting_cves && compatible(row, other)
-                    }));
-                }
+        for key in candidate_keys(row, identities[i]) {
+            if let Some(matches) = index.get(&key) {
+                candidates.extend(matches.iter().copied().filter(|&j| {
+                    let (peer, other) = &observations[j];
+                    let other = other.as_ref().unwrap();
+                    let conflicting_cves = identities[i].starts_with("CVE-")
+                        && identities[j].starts_with("CVE-")
+                        && identities[i] != identities[j];
+                    peer != engine && !conflicting_cves && compatible(row, other)
+                }));
             }
         }
         edges.push(candidates);

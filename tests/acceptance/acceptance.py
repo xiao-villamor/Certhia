@@ -99,6 +99,7 @@ class GiteaFixture(JsonHandler):
                 return
             body, media = image['config'], 'application/octet-stream'
         elif path == '/v2/team/api/blobs/' + image['layer_digest']:
+            self.server.layer_requests += 1
             if self.server.denied_blob == 'layer':
                 self.reply(404, {'errors':[{'code':'BLOB_UNKNOWN','message':'blob unknown'}]})
                 return
@@ -362,6 +363,7 @@ def test_private_pull(api, gitea, tmp, bindir, skopeo):
     gitea.image = {'manifest': manifest, 'digest': digest(manifest), 'config': config,
                    'config_digest': digest(config), 'layer': layer, 'layer_digest': digest(layer)}
     gitea.denied_blob = None
+    gitea.layer_requests = 0
 
     host = f'127.0.0.1:{gitea.server_port}'
     connection = {'name': 'Private pull fixture', 'host': host, 'protocol': 'http',
@@ -393,8 +395,12 @@ done
         denied = api.read(probe, target, status=400)['error']
         assert 'image configuration' in denied and 'access denied' in denied.lower(), denied
 
-        def scan():
-            queued = api.read('/scans', {**target, 'registryId': profile, 'scanners': ['trivy']}, status=202)['id']
+        def scan(previous=None):
+            queued = (
+                api.read('/scans/' + previous + '/rescan', method='POST', status=202)
+                if previous else
+                api.read('/scans', {**target, 'registryId': profile, 'scanners': ['trivy']}, status=202)
+            )['id']
             for _ in range(120):
                 detail = api.read('/scans/' + queued)
                 if detail['status'] in ('completed', 'failed'):
@@ -411,11 +417,34 @@ done
         gitea.denied_blob = None
         result = scan()
         assert result['status'] == 'completed' and result['report']['digest'] == digest(manifest), result
+        steps = lambda scan_id: [row['step'] for row in api.read('/scans/' + scan_id + '/progress')['activity']]
+        assert {'image_download', 'image_ready'}.issubset(steps(result['id']))
+        layer_requests = gitea.layer_requests
+        report.write_text(json.dumps({
+            'SchemaVersion': 2, 'ArtifactType': 'container_image',
+            'Results': [{'Type': 'alpine', 'Vulnerabilities': [{
+                'VulnerabilityID': 'CACHE-FIXTURE', 'PkgName': 'demo',
+                'InstalledVersion': '1.0', 'Severity': 'HIGH',
+            }]}],
+        }))
+        rescanned = scan(result['id'])
+        assert rescanned['status'] == 'completed' and rescanned['id'] != result['id'], rescanned
+        assert rescanned['report']['findings'][0]['id'] == 'CACHE-FIXTURE', rescanned
+        assert gitea.layer_requests == layer_requests
+        warm_steps = steps(rescanned['id'])
+        assert 'image_cached' in warm_steps and 'image_download' not in warm_steps, warm_steps
+
+        # Whitespace changes the manifest digest without changing its referenced blobs.
+        gitea.image['manifest'] = manifest + b'\n'
+        gitea.image['digest'] = digest(gitea.image['manifest'])
+        changed = scan(rescanned['id'])
+        assert changed['status'] == 'completed' and changed['report']['digest'] == gitea.image['digest'], changed
+        assert gitea.layer_requests > layer_requests and 'image_download' in steps(changed['id'])
     finally:
         trivy.unlink()
         (bindir / 'skopeo').unlink()
         gitea.image = None
-    print('PASS private registry auth and platform probe, blocked config, missing layer, and Trivy scan of a pulled image', flush=True)
+    print('PASS private registry auth, failed pull, cached rescan, moved tag, and download activity', flush=True)
 
 
 def scan_archive(api, archive, reference, engines, completed=None):
@@ -700,7 +729,8 @@ def test_ci_scan(api, bindir, tmp):
     config = api.read('/registries/' + path + '/webhook', method='POST')
     ci = config['ciPath'][4:]
     token = config['token']
-    image = host + '/team/test@sha256:' + '9' * 64
+    manifest = b'{"schemaVersion":2}'
+    image = host + '/team/test@sha256:' + hashlib.sha256(manifest).hexdigest()
     fixture = tmp / 'ci-report.json'
     fixture.write_text(json.dumps({
         'SchemaVersion': 2, 'ArtifactType': 'container_image', 'Metadata': {'RepoDigests': [image]},
@@ -716,12 +746,32 @@ def test_ci_scan(api, bindir, tmp):
 for arg in "$@"; do
   if [ "$output_next" = "yes" ]; then output="$arg"; output_next=no; fi
   if [ "$arg" = "--output" ]; then output_next=yes; fi
-  last="$arg"
 done
-[ "$last" = {shlex.quote(image)} ] || exit 1
 /bin/cp {shlex.quote(str(fixture))} "$output"
 ''')
     trivy.chmod(0o700)
+    skopeo = bindir / 'skopeo'
+    skopeo.write_text(f'''#!/bin/sh
+while [ "$1" != "inspect" ] && [ "$1" != "copy" ]; do shift; done
+case "$1" in
+  inspect)
+    case "$*" in
+      *{shlex.quote(image)}) ;;
+      *) exit 1 ;;
+    esac
+    case "$*" in
+      *--config*) printf '%s' '{{"os":"linux","architecture":"amd64"}}' ;;
+      *) printf '%s' {shlex.quote(manifest.decode())} ;;
+    esac
+    ;;
+  copy)
+    while [ "$#" -gt 2 ]; do shift; done
+    path=${{2#docker-archive:}}
+    printf '%s' fixture > "${{path%:certhia:scan}}"
+    ;;
+esac
+''')
+    skopeo.chmod(0o700)
     action = PROJECT / 'integrations/github-action/scan.cjs'
     output = tmp / 'ci-output.txt'
     summary = tmp / 'ci-summary.md'
@@ -757,6 +807,7 @@ done
         machine.read(result_path, token=token, status=401)
     finally:
         trivy.unlink()
+        skopeo.unlink()
     print('PASS GitHub Action and CI API: poll a digest scan, report deduplicated fixes, enforce the gate and protect results across profiles', flush=True)
 
 

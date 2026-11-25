@@ -28,28 +28,44 @@ pub async fn scan(
     let data = tokio::fs::canonicalize(&app.0.data).await?;
     let work = tempfile::tempdir_in(data.join("archives"))?;
     let staged = work.path().join("image.tar");
-    let remote = matches!(target, Target::Remote(..));
     let mut digest = None;
-    let source = match target {
+    let archive = match target {
         Target::Remote(reference, insecure) => {
             activity
                 .record(
-                    "image",
-                    "Preparing registry image",
-                    "Resolving the platform digest and copying the image for the selected scanners.",
+                    "image_manifest",
+                    "Resolving image manifest",
+                    "Checking the registry for the current digest and selected platform.",
                 )
                 .await;
             let pinned =
                 images::pin(reference, &job.platform, credentials.clone(), insecure).await?;
             digest = pinned.rsplit_once('@').map(|(_, digest)| digest.to_owned());
-            Some(images::Source {
+            let pinned_reference = crate::ImageReference::parse(&pinned, None)?;
+            images::verify_access(
+                &pinned_reference,
+                &job.platform,
+                credentials.clone(),
+                insecure,
+            )
+            .await?;
+            let source = images::Source {
                 transport: format!("docker://{pinned}"),
                 reference: pinned,
                 platform: job.platform.clone(),
                 auth: credentials,
                 host: reference.host.clone(),
                 insecure,
-            })
+            };
+            images::cache::prepare(
+                &data.join("archives").join("registry-cache"),
+                &staged,
+                job.registry_id.as_deref(),
+                source,
+                activity,
+            )
+            .await?;
+            staged
         }
         Target::Docker(reference) => {
             crate::discovery::socket().map_err(|error| anyhow::anyhow!(error.1))?;
@@ -60,36 +76,25 @@ pub async fn scan(
                     "Copying the local image for the selected scanners.",
                 )
                 .await;
-            Some(images::Source {
+            let source = images::Source {
                 transport: format!("docker-daemon:{reference}"),
                 reference: reference.to_owned(),
                 platform: job.platform.clone(),
                 auth: None,
                 host: String::new(),
                 insecure: false,
-            })
+            };
+            images::copy(
+                source,
+                &format!("docker-archive:{}:certhia:scan", staged.display()),
+                "",
+                None,
+                false,
+            )
+            .await?;
+            staged
         }
-        Target::Archive(_) => None,
-    };
-    let archive = if let Target::Archive(path) = target {
-        tokio::fs::canonicalize(path).await?
-    } else {
-        images::copy(
-            source.context("Missing image source.")?,
-            &format!("docker-archive:{}:certhia:scan", staged.display()),
-            "",
-            None,
-            false,
-        )
-        .await
-        .map_err(|error| {
-            if remote {
-                anyhow::anyhow!("Could not download and prepare image layers for {}. {error}", job.platform)
-            } else {
-                error
-            }
-        })?;
-        staged
+        Target::Archive(path) => tokio::fs::canonicalize(path).await?,
     };
 
     let mut captured = Captured::default();
@@ -104,7 +109,6 @@ pub async fn scan(
             scanner::scan(
                 Target::Archive(&archive),
                 &job.platform,
-                None,
                 &app.0.cache,
                 activity,
             )

@@ -483,25 +483,42 @@ async fn import_scan(
     Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ComparisonResponse {
+    baseline: store::Scan,
+    target: store::Scan,
+    baseline_digest: Option<String>,
+    target_digest: Option<String>,
+    scanners: Vec<&'static str>,
+    changes: domain::Comparison,
+    baseline_scanners: Vec<&'static str>,
+    target_scanners: Vec<&'static str>,
+    publication: Option<String>,
+    selected: Vec<SelectedAdvisory>,
+    baseline_issues: serde_json::Value,
+    target_issues: serde_json::Value,
+}
+
+#[derive(serde::Serialize)]
+struct SelectedAdvisory {
+    id: String,
+    detected: bool,
+}
+
 async fn compare_scans(
     State(app): State<App>,
     Query(input): Query<CompareInput>,
-) -> ApiResult<Json<serde_json::Value>> {
+) -> ApiResult<Response> {
     if input.baseline == input.target {
         return Err(ApiError::bad("Choose two different scans."));
     }
-    let baseline = app
-        .0
-        .database
-        .scan(&input.baseline)
-        .await?
-        .ok_or_else(|| ApiError::missing("Baseline scan not found."))?;
-    let target = app
-        .0
-        .database
-        .scan(&input.target)
-        .await?
-        .ok_or_else(|| ApiError::missing("Target scan not found."))?;
+    let (baseline, target) = tokio::try_join!(
+        app.0.database.scan(&input.baseline),
+        app.0.database.scan(&input.target),
+    )?;
+    let baseline = baseline.ok_or_else(|| ApiError::missing("Baseline scan not found."))?;
+    let target = target.ok_or_else(|| ApiError::missing("Target scan not found."))?;
     let incomplete = || ApiError::bad("Both scans must have completed reports.");
     let mut before = baseline.report.ok_or_else(incomplete)?;
     let mut after = target.report.ok_or_else(incomplete)?;
@@ -555,23 +572,47 @@ async fn compare_scans(
         )
         .await
     };
-    let selected = selected
-        .into_iter()
-        .map(|id| {
-            let detected = after.findings.iter().any(|finding| finding.id == id);
-            json!({"id":id,"detected":detected})
-        })
-        .collect::<Vec<_>>();
     let (before_issues, after_issues) = tokio::try_join!(
         comparison::issues(&app, &input.baseline),
         comparison::issues(&app, &input.target)
     )?;
-    Ok(Json(json!({
-        "baseline":baseline.scan,"target":target.scan,"baselineDigest":before.digest,
-        "targetDigest":after.digest,"scanners":scanners,"changes":compare(&before,&after),
-        "baselineScanners":baseline_scanners,"targetScanners":target_scanners,
-        "publication":publication,"selected":selected,"baselineIssues":before_issues,"targetIssues":after_issues
-    })))
+    let bytes = tokio::task::spawn_blocking(move || {
+        let selected = if selected.is_empty() {
+            Vec::new()
+        } else {
+            let detected: std::collections::HashSet<_> = after
+                .findings
+                .iter()
+                .map(|finding| finding.id.as_str())
+                .collect();
+            selected
+                .into_iter()
+                .map(|id| SelectedAdvisory {
+                    detected: detected.contains(id.as_str()),
+                    id,
+                })
+                .collect()
+        };
+        let changes = compare(&before, &after);
+        serde_json::to_vec(&ComparisonResponse {
+            baseline: baseline.scan,
+            target: target.scan,
+            baseline_digest: before.digest,
+            target_digest: after.digest,
+            scanners,
+            changes,
+            baseline_scanners,
+            target_scanners,
+            publication,
+            selected,
+            baseline_issues: before_issues,
+            target_issues: after_issues,
+        })
+    })
+    .await
+    .map_err(anyhow::Error::from)?
+    .map_err(anyhow::Error::from)?;
+    Ok(([(header::CONTENT_TYPE, "application/json")], bytes).into_response())
 }
 
 async fn run_scan(app: &App, job: &store::Job, activity: jobs::Activity<'_>) -> Result<Captured> {
@@ -609,10 +650,8 @@ async fn run_scan(app: &App, job: &store::Job, activity: jobs::Activity<'_>) -> 
             )
         }
     };
-    // Use the same registry client as the access check for authenticated images.
-    let stage_remote = matches!(target, scanner::Target::Remote(_, insecure) if insecure || credentials.is_some());
-    let captured = if selected == ["trivy"] && !stage_remote {
-        scanner::scan(target, &job.platform, credentials, &app.0.cache, activity).await?
+    let captured = if selected == ["trivy"] && !matches!(target, scanner::Target::Remote(..)) {
+        scanner::scan(target, &job.platform, &app.0.cache, activity).await?
     } else {
         native_scanners::scan(app, job, target, credentials, &selected, activity).await?
     };

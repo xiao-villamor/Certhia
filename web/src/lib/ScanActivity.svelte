@@ -8,6 +8,7 @@
   const queued = $derived(scan.status === 'queued');
   const entries = $derived(progress?.activity ?? []);
   const latest = $derived(entries.at(-1));
+  const downloading = $derived(scan.status === 'running' && latest?.step === 'image_download');
   const startedAt = $derived(progress?.startedAt || scan.createdAt);
   const endedAt = $derived(scan.finishedAt ? Date.parse(scan.finishedAt) : now);
   const duration = $derived(Math.max(0, Math.floor((endedAt - Date.parse(queued ? scan.createdAt : startedAt)) / 1000)));
@@ -56,7 +57,7 @@
       <div class="stage-meta"><a class="table-link" href="/#scan-activity">Open scan queue</a></div>
     {:else if scan.status === 'running' && latest}
       <div class="stage-meta">
-        <span>Current stage · {since(latest.at)}</span>
+        <span>{downloading ? 'Downloading for' : 'Current stage ·'} {since(latest.at)}</span>
         {#if progress?.workerHeartbeatAt}<span>Worker last checked in · {since(progress.workerHeartbeatAt)} ago</span>{/if}
       </div>
     {/if}

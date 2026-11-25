@@ -244,7 +244,10 @@ pub async fn publication_report(
         .await?
         .ok_or_else(unavailable)?;
     let (mut parsed, os_vulnerability_results) =
-        Report::parse_trivy(&raw).map_err(ApiError::bad)?;
+        tokio::task::spawn_blocking(move || Report::parse_trivy(&raw))
+            .await
+            .map_err(anyhow::Error::from)?
+            .map_err(ApiError::bad)?;
     if parsed.observation_complete != Some(true) || !os_vulnerability_results {
         return Err(unavailable());
     }

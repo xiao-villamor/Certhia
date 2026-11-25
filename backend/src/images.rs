@@ -21,6 +21,8 @@ use tempfile::TempDir;
 use tokio::process::Command;
 use tokio_util::io::ReaderStream;
 
+pub(crate) mod cache;
+
 pub fn routes() -> Router<App> {
     Router::new()
         .route("/images/{id}/archive", get(download_image))

@@ -53,7 +53,8 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
       if (key === '/api/discover/dockerhub/tags') return json({tags:['latest','3.22']});
       if (key.startsWith('/api/registries/reg-1/catalog')) return json(catalogMode === 'restricted'
         ? {images:[],refreshedAt:null,error:'Catalog listing is restricted.',nextCursor:null}
-        : {images:['team/api','team.ops/worker'], refreshedAt:new Date().toISOString(), error:null,nextCursor:null});
+        : {images:['team/api','team.ops/worker'].filter(image => image.includes(url.searchParams.get('search') || '')),
+          refreshedAt:new Date().toISOString(), error:null,nextCursor:null});
       if (key === '/api/registries/reg-1/tags') {
         if (catalogMode === 'tags-denied') return json({error:'Could not list tags.'},403);
         if (url.searchParams.get('image') === registry.host + '/team/api') return json({tags:['1.0','1.1']});
@@ -73,6 +74,8 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
       const parts = key.split('/');
       const scanId = parts[3];
       if (parts[2] === 'scans' && (parts.length === 4 || parts[5] === 'summary')) {
+        if (scanId === 'download') return json({id:scanId,reference,platform:'linux/amd64',source:'registry',
+          status:'running',facets:[],createdAt:new Date().toISOString(),finishedAt:null,counts:null,report:null});
         const inventoryAvailable = scanId === 'inventory';
         const counts = {critical:0,high:0,medium:0,low:0,unknown:0,packages:Number(inventoryAvailable)};
         return json({id:scanId,reference,platform:'linux/amd64',source:'kubernetes',
@@ -81,6 +84,14 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
             inventoryAvailable,findings:[],checks:[],digest:null,os:'Debian',sizeBytes:512}});
       }
       if (parts[4] === 'classifications') return json([]);
+      if (parts[4] === 'events' && scanId === 'download') {
+        const at = new Date().toISOString();
+        return route.fulfill({contentType:'text/event-stream',body:'event: progress\ndata: ' + JSON.stringify({
+          id:scanId,status:'running',startedAt:at,activity:[
+            {step:'image_download',title:'Downloading image layers',detail:'Fetching layers from the registry.',at}
+          ]
+        }) + '\n\n'});
+      }
       if (parts[4] === 'progress') return json({id:scanId,status:'completed',activity:[]});
       if (parts[4] === 'watch') return route.fulfill({body:'null',contentType:'application/json'});
       if (parts[4] === 'scanner-results' && parts.length === 5) {
@@ -164,14 +175,28 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     const repositories = main.getByRole('combobox',{name:'Repository',exact:true});
     const tags = main.getByRole('combobox',{name:'Tag',exact:true});
     const profile = main.getByRole('combobox',{name:'Registry connection'});
+    const repositoryFilter = main.getByRole('searchbox',{name:'Filter repositories'});
+    await repositoryFilter.fill('no-such-repo');
+    await main.getByText('No repositories match this filter.').waitFor();
+    await repositoryFilter.fill('TEAM/API');
+    await repositories.getByRole('option',{name:'team/api',exact:true}).waitFor({state:'attached'});
+    assert.equal(await repositories.getByRole('option',{name:'team.ops/worker',exact:true}).count(),0);
     await repositories.selectOption('team/api');
     assert.equal(await ref.count(),0);
     assert.ok(await startScan.isDisabled());
+    const tagFilter = main.getByRole('searchbox',{name:'Filter tags'});
+    await tagFilter.fill('1.1');
+    assert.equal(await tags.getByRole('option',{name:'1.0',exact:true}).count(),0);
     await tags.selectOption('1.1');
     assert.ok(await startScan.isEnabled());
+    await tagFilter.fill('no-such-tag');
+    await main.getByText('No tags match this filter.').waitFor();
+    assert.equal(await tags.inputValue(),'1.1');
+    await tagFilter.clear();
     await tags.selectOption('');
     assert.ok(await startScan.isDisabled());
     await tags.selectOption('1.1');
+    await repositoryFilter.clear();
     await repositories.selectOption('team.ops/worker');
     assert.equal(await tags.inputValue(),'');
     assert.ok(await startScan.isDisabled());
@@ -253,6 +278,13 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     await dialog.getByRole('button',{name:'Cancel',exact:true}).click();
     assert.equal(await dialog.count(),0);
     console.log('PASS mobile launch dialog, all namespaces, change of source, no browser exceptions');
+
+    await page.goto(origin + '/scans/download');
+    const activity = main.getByRole('region',{name:'Downloading image layers'});
+    await activity.getByRole('heading',{name:'Downloading image layers'}).waitFor();
+    await activity.getByText(/Downloading for \d+s/).waitFor();
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    console.log('PASS live image download status and elapsed time on mobile');
 
     role = 'admin';
     await page.setViewportSize({width:1280,height:800});

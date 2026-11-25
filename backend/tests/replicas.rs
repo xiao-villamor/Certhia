@@ -102,6 +102,31 @@ async fn batch_has_one_result_per_job_across_worker_crash() -> Result<()> {
     );
     let data = tempfile::tempdir()?;
     let bin = tempfile::tempdir()?;
+    let skopeo = bin.path().join("skopeo");
+    std::fs::write(
+        &skopeo,
+        r#"#!/bin/sh
+set -eu
+while [ "$1" != "inspect" ] && [ "$1" != "copy" ]; do shift; done
+case "$1" in
+  inspect)
+    for ref do
+      if [ "$ref" = "--config" ]; then
+        printf '%s' '{"os":"linux","architecture":"amd64"}'
+        exit 0
+      fi
+    done
+    printf '{"schemaVersion":2,"fixture":"%s"}' "$ref"
+    ;;
+  copy)
+    while [ "$#" -gt 2 ]; do shift; done
+    path=${2#docker-archive:}
+    printf '%s\n' "$1" > "${path%:certhia:scan}"
+    ;;
+esac
+"#,
+    )?;
+    std::fs::set_permissions(skopeo, std::fs::Permissions::from_mode(0o700))?;
     let scanner = bin.path().join("trivy");
     std::fs::write(
         &scanner,
@@ -109,8 +134,8 @@ async fn batch_has_one_result_per_job_across_worker_crash() -> Result<()> {
 set -eu
 while [ "$1" != "--output" ]; do shift; done
 out=$2
-ref=""
-for arg do ref=$arg; done
+while [ "$1" != "--input" ]; do shift; done
+ref=$(cat "$2")
 printf '%s\n' '{"SchemaVersion":2,"ArtifactType":"container_image","Results":[{"Type":"apk","Packages":[{"Name":"fixture","Version":"1"}],"Vulnerabilities":[{"VulnerabilityID":"FIXTURE","PkgName":"fixture","InstalledVersion":"1","Severity":"HIGH"}]}]}' > "$out"
 printf '%s\n' "$ref" >> "$CERTHIA_DATA_DIR/calls"
 printf '%s\n' "$CERTHIA_BIND" >> "$CERTHIA_DATA_DIR/owners"
@@ -217,7 +242,8 @@ fi
     let findings: i64 = sqlx::query_scalar("SELECT count(*) FROM findings")
         .fetch_one(&pool)
         .await?;
-    assert_eq!((completed, findings), (8, 1));
+    // Each tag in the registry fixture resolves to a distinct manifest digest.
+    assert_eq!((completed, findings), (8, 8));
     let owners = std::fs::read_to_string(data.path().join("owners"))?;
     assert_eq!(
         owners

@@ -323,18 +323,20 @@ impl Captured {
                         .as_object()
                         .is_some_and(|v| v.iter().any(|(k, v)| k != "id" && !v.is_null()))
                     {
-                        advisories.insert(id.to_owned(), meta);
+                        advisories.insert(id, meta);
                     }
                 }
             }
         }
-        let advisory_metadata = serde_json::to_value(advisories.into_values().collect::<Vec<_>>())?;
+        let advisory_metadata = serde_json::Value::Array(advisories.into_values().collect());
         let scanner_version = raw["Trivy"]["Version"].as_str().map(str::to_owned);
         let scanner_db_version = raw["Trivy"]["VulnerabilityDB"]["UpdatedAt"]
             .as_str()
             .map(str::to_owned);
+        let input = TrivyReport::deserialize(&raw)
+            .map_err(|_| anyhow::anyhow!("Upload a valid Trivy container image JSON report."))?;
+        let (report, _) = Report::normalize_trivy(input)?;
         let raw = serde_json::to_vec(&raw)?;
-        let report = Report::from_trivy(&raw)?;
         Ok(Self {
             report,
             raw: Some(raw),
@@ -456,6 +458,10 @@ impl Report {
     pub(crate) fn parse_trivy(bytes: &[u8]) -> Result<(Self, bool)> {
         let input: TrivyReport = serde_json::from_slice(bytes)
             .map_err(|_| anyhow::anyhow!("Upload a valid Trivy container image JSON report."))?;
+        Self::normalize_trivy(input)
+    }
+
+    fn normalize_trivy(input: TrivyReport) -> Result<(Self, bool)> {
         if input.schema_version != 2 || input.artifact_type != "container_image" {
             bail!("Upload a Trivy container image report with schema version 2.");
         }
@@ -630,50 +636,84 @@ pub struct Comparison {
     pub inventory_available: bool,
 }
 
-type Versions = BTreeMap<(String, String), BTreeSet<String>>;
+// Both maps already have ordered keys. Walk them once and move each value
+// directly into its comparison row when needed.
+fn ordered_pairs<K: Ord, V>(
+    before: BTreeMap<K, V>,
+    after: BTreeMap<K, V>,
+) -> impl Iterator<Item = (K, Option<V>, Option<V>)> {
+    let mut before = before.into_iter().peekable();
+    let mut after = after.into_iter().peekable();
+    std::iter::from_fn(move || {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        let order = match (before.peek(), after.peek()) {
+            (Some((left, _)), Some((right, _))) => left.cmp(right),
+            (Some(_), None) => Less,
+            (None, Some(_)) => Greater,
+            (None, None) => return None,
+        };
+        Some(match order {
+            Less => {
+                let (key, value) = before.next().unwrap();
+                (key, Some(value), None)
+            }
+            Greater => {
+                let (key, value) = after.next().unwrap();
+                (key, None, Some(value))
+            }
+            Equal => {
+                let (key, previous) = before.next().unwrap();
+                let (_, current) = after.next().unwrap();
+                (key, Some(previous), Some(current))
+            }
+        })
+    })
+}
 
-fn diff(before: Versions, after: Versions) -> Vec<Change> {
-    let keys: BTreeSet<_> = before.keys().chain(after.keys()).collect();
-    keys.into_iter()
-        .filter_map(|key| {
-            let previous = before.get(key);
-            let current = after.get(key);
+type Versions<'a, N, V> = BTreeMap<(&'a str, N), BTreeSet<V>>;
+
+fn diff<N: Ord + Into<String>, V: Ord + Into<String>>(
+    before: Versions<'_, N, V>,
+    after: Versions<'_, N, V>,
+) -> Vec<Change> {
+    ordered_pairs(before, after)
+        .filter_map(|((ecosystem, name), previous, current)| {
             if previous == current {
                 return None;
             }
-            let status = match (previous, current) {
+            let status = match (&previous, &current) {
                 (None, _) => "Added",
                 (_, None) => "Removed",
                 _ => "Changed",
             };
             Some(Change {
-                ecosystem: key.0.clone(),
-                name: key.1.clone(),
+                ecosystem: ecosystem.into(),
+                name: name.into(),
                 status,
-                before: previous.into_iter().flatten().cloned().collect(),
-                after: current.into_iter().flatten().cloned().collect(),
+                before: previous.into_iter().flatten().map(Into::into).collect(),
+                after: current.into_iter().flatten().map(Into::into).collect(),
             })
         })
         .collect()
 }
 
-fn packages(report: &Report) -> Versions {
+fn packages(report: &Report) -> Versions<'_, &str, &str> {
     let mut versions = Versions::new();
     for package in &report.packages {
         versions
-            .entry((package.ecosystem.clone(), package.name.clone()))
+            .entry((package.ecosystem.as_str(), package.name.as_str()))
             .or_default()
-            .insert(package.version.clone());
+            .insert(package.version.as_str());
     }
     versions
 }
 
-fn findings(report: &Report) -> Versions {
+fn findings(report: &Report) -> Versions<'_, String, String> {
     let mut versions = Versions::new();
     for finding in &report.findings {
         let label = format!("{} · {}", finding.id, finding.package);
         versions
-            .entry((finding.ecosystem.clone(), label))
+            .entry((finding.ecosystem.as_str(), label))
             .or_default()
             .insert(finding_state(finding));
     }
@@ -729,13 +769,12 @@ fn observation_versions(report: &Report) -> BTreeMap<(&str, &str, &str), Observe
 fn observation_diff(baseline: &Report, target: &Report) -> Vec<Observation> {
     let before = observation_versions(baseline);
     let after = observation_versions(target);
-    let keys: BTreeSet<_> = before.keys().chain(after.keys()).collect();
-    keys.into_iter()
-        .map(|&(ecosystem, advisory, package)| {
-            let key = (ecosystem, advisory, package);
-            let previous = before.get(&key);
-            let current = after.get(&key);
-            let evidence = current.or(previous).expect("observation has a report");
+    ordered_pairs(before, after)
+        .map(|((ecosystem, advisory, package), previous, current)| {
+            let evidence = current
+                .as_ref()
+                .or(previous.as_ref())
+                .expect("observation has a report");
             Observation {
                 advisory: advisory.to_owned(),
                 severity: evidence.severity.to_owned(),
@@ -743,16 +782,16 @@ fn observation_diff(baseline: &Report, target: &Report) -> Vec<Observation> {
                 change: Change {
                     name: format!("{advisory} · {package}"),
                     ecosystem: ecosystem.to_owned(),
-                    status: match (previous, current) {
+                    status: match (&previous, &current) {
                         (None, _) => "Added",
                         (_, None) => "Removed",
                         _ => "Still detected",
                     },
                     before: previous
-                        .map(|item| item.versions.iter().cloned().collect())
+                        .map(|item| item.versions.into_iter().collect())
                         .unwrap_or_default(),
                     after: current
-                        .map(|item| item.versions.iter().cloned().collect())
+                        .map(|item| item.versions.into_iter().collect())
                         .unwrap_or_default(),
                 },
             }
