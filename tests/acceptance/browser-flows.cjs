@@ -54,7 +54,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
       if (key.startsWith('/api/registries/reg-1/catalog')) return json(catalogMode === 'restricted'
         ? {images:[],refreshedAt:null,error:'Catalog listing is restricted.',nextCursor:null}
         : {images:['team/api','team.ops/worker'].filter(image => image.includes(url.searchParams.get('search') || '')),
-          refreshedAt:new Date().toISOString(), error:null,nextCursor:null});
+          refreshedAt:new Date().toISOString(), error:null,nextCursor:url.searchParams.get('search') ? null : 'page-2'});
       if (key === '/api/registries/reg-1/tags') {
         if (catalogMode === 'tags-denied') return json({error:'Could not list tags.'},403);
         if (url.searchParams.get('image') === registry.host + '/team/api') return json({tags:['1.0','1.1']});
@@ -176,8 +176,14 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     const tags = main.getByRole('combobox',{name:'Tag',exact:true});
     const profile = main.getByRole('combobox',{name:'Registry connection'});
     const repositoryFilter = main.getByRole('searchbox',{name:'Filter repositories'});
+    await main.getByRole('button',{name:'Load more repositories'}).waitFor();
+    await page.evaluate(() => document.fonts.ready);
+    const initialStart = await startScan.boundingBox();
     await repositoryFilter.fill('no-such-repo');
+    await main.getByText('Searching repositories…').waitFor();
+    assert.deepEqual(await startScan.boundingBox(),initialStart);
     await main.getByText('No repositories match this filter.').waitFor();
+    assert.deepEqual(await startScan.boundingBox(),initialStart);
     await repositoryFilter.fill('TEAM/API');
     await repositories.getByRole('option',{name:'team/api',exact:true}).waitFor({state:'attached'});
     assert.equal(await repositories.getByRole('option',{name:'team.ops/worker',exact:true}).count(),0);
@@ -186,11 +192,13 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     assert.ok(await startScan.isDisabled());
     const tagFilter = main.getByRole('searchbox',{name:'Filter tags'});
     await tagFilter.fill('1.1');
+    assert.deepEqual(await startScan.boundingBox(),initialStart);
     assert.equal(await tags.getByRole('option',{name:'1.0',exact:true}).count(),0);
     await tags.selectOption('1.1');
     assert.ok(await startScan.isEnabled());
     await tagFilter.fill('no-such-tag');
     await main.getByText('No tags match this filter.').waitFor();
+    assert.deepEqual(await startScan.boundingBox(),initialStart);
     assert.equal(await tags.inputValue(),'1.1');
     await tagFilter.clear();
     await tags.selectOption('');
